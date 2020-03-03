@@ -97,6 +97,7 @@ class masterProcess:
             infer_dir = 'infer_ptmle//'
             [my_task,time_start] = parallelOps.get_next_open_task('tasklog.csv', 'microscopy_tasklist.csv', 'infer_ptmle')
                             
+        import ipdb; ipdb.set_trace()
         if not (my_task is None):
 
             sysOps.initiate_runpath(str(my_task[1]))

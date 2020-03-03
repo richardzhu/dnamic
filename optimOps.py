@@ -168,6 +168,7 @@ def get_glo_indices(max_nu,spat_dims):
 
     return glo_indices
 
+
 def pt_mle(sub_mle,output_Xumi_filename):
     # perform unstructured "point-MLE" likelihood maximization
     
@@ -184,6 +185,7 @@ def pt_mle(sub_mle,output_Xumi_filename):
                np.concatenate([sub_mle.index_key.reshape([sub_mle.Numi,1]), my_Xumi],axis = 1),
                fmt='%.10e',delimiter=',')
     return
+
 
 def spec_mle(sub_mle, output_Xumi_filename = None):
     # perform structured "spectral MLE" (sMLE) likelihood maximization
@@ -867,6 +869,10 @@ class mleObj:
                 if self.print_status:
                     sysOps.throw_status('No max_nontriv_eigenvec_to_calculate value entered. Proceeding with non-spectral MLE.')
                 self.max_nontriv_eigenvec_to_calculate = None
+        
+        import pickle
+        with open(os.path.expanduser('~/Downloads/weinstein-mleobj.pkl'), 'wb') as fp:
+            pickle.dump(self.__dict__, fp)
             
         
     def load_data(self,infilename,inp_data=None):
