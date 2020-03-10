@@ -1,0 +1,9 @@
+-uei_per_bcn_umi 100
+-reads_per_uei 10
+-sim_dims 3
+-effic_monomer 0.95
+-effic_dimer 0.95
+-diffconst 1.0
+-lin_cycles 10
+-exp_cycles 16
+-posfilename posfile.csv

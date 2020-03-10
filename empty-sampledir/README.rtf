@@ -1,0 +1,29 @@
+{\rtf1\ansi\ansicpg1252\cocoartf1561\cocoasubrtf600
+{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww24160\viewh17340\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\b\fs28 \cf0 README
+\b0 \
+\
+The following instructions show how to run a full analysis on simulated DNA microscopy data, but can also be applied to real data.\
+
+\b \
+Section 1: SETTING UP SIMULATED DATA
+\b0 \
+1. cd to sampledir directory\
+2. Make sure the following files are present: posfile.csv, sim_params.csv, libsettings.txt (the files generate_pts.m and im.tif are necessary to simulate new data, but will simply output posfile.csv, which is the only part of their output that will be used).\
+3. In command-line, enter \'93sh run_sim.txt\'94. This generate simulated DNA microscopy reads using the parameters in sim_params.csv and the oligo layout in libsettings.txt. Directory structure for analysis will be generated automatically.\
+
+\b \
+Section 2: ANALYSIS
+\b0 \
+1. After read data and directory structures are formed, proceed with read analysis by entering \'93sh run_uxi_lib.txt\'94. This will parse the simulated reads, and then perform uxi-clustering. Afterward, it will perform these same analyses on sub-sampled reads at read depths starting at 1e5 and proceeding upwards by factors of 2.\
+2. After sequence analysis is done, enter \'93sh run_mic_smle.txt\'94. This will perform image inference using the sMLE algorithm and print the final output into the infer_smle sub-directory. If left to proceed afterward, it will continue to perform this same analysis on all sub-sample sub-directories generated during sequence analysis.\
+\
+
+\b Section 3: VISUALIZATION OF SIMULATED OUTPUT
+\b0 \
+To visualize output in MATLAB, open and run plot_sim.m in sampledir directory}

@@ -1,0 +1,12 @@
+-source_for _
+-source_rev _
+-seqform_for U_ANNNNNNNWWSNNNWWWNNNSWWNNNNNNNA_1:32|P_gcgtaagtttaggacacctcaa_32:54|U_NNNNNATNNNNNtggcgcgccatgggaataaNNNNNATNNNNN_54:97|P_TG_97:99
+-seqform_for U_CANNNNNNNWWSNNNWWWNNNSWWNNNNNNN_1:32|P_gcgtaagtttaggacacctcaa_32:54|U_NNNNNATNNNNNtggcgcgccatgggaataaNNNNNATNNNNN_54:97|P_TG_97:99
+-seqform_for U_GTCANNNNNNNWWSNNNWWWNNNSWWNNNNNNN_1:34|P_gcgtaagtttaggacacctcaa_34:56|U_NNNNNATNNNNNtggcgcgccatgggaataaNNNNNATNNNNN_56:99|P_TG_99:101
+-seqform_rev U_TNNNNNNNWWSNNNWWWNNNSWWNNNNNNNA_1:32|A_32:
+-seqform_rev U_NNNNNNNWWSNNNWWWNNNSWWNNNNNNNTG_1:32|A_32:
+-seqform_rev U_NNNNNNNWWSNNNWWWNNNSWWNNNNNNNT_1:31|A_31:
+-max_mismatch_amplicon 0.06
+-max_mismatch 0.06
+-min_mean_qual 30
+-filter_amplicon_window 25
