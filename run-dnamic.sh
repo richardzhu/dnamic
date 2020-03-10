@@ -7,10 +7,10 @@ cp posfile.csv sampledir/posfile.csv
 
 # run simulation code [warning: this can take a _long_ time, 20-30 mins]
 cd sampledir/
-python2 ../simOps.py
-python2 ../main.py
-python2 ../main.py smle_infer
-python2 ../main.py ptmle_infer
+python2 ../simOps.py  # run chemical 'dynamics' simulation
+python2 ../main.py  # simulate noisy DNA sequencing
+python2 ../main.py smle_infer  # use spectral-MLE to infer positions
+python2 ../main.py ptmle_infer  # use point-MLE to infer positions
 
 # save the relevant position files to base directory
 SMLE_SRC=$(find . -regex ".*r[0-9]*/infer_smle/final_Xumi.*.csv" | tail -1)
