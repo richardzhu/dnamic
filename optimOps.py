@@ -2,7 +2,7 @@ import numpy as np
 import scipy
 import sysOps
 import itertools
-import scipy
+import dnamicOps
 from scipy import misc
 import fileOps
 from numpy import linalg as LA
@@ -17,6 +17,93 @@ from numba import jit, types
 import os
 import time
 
+class ffgtDotObj: # class object for MULTIPLYING THE GAUSSIAN KERNAL MATRIX BY AN ARBITRARY VECTOR in O(Numi) time
+    def __init__(self,Xumi,this_mle,local_sum_bcn_uei,local_sum_trg_uei,add_csc_op = None):
+        
+        self.mle = this_mle
+        self.mle.prev_axial_bcn_fft = None
+        self.mle.prev_axial_trg_fft = None
+        self.mle.prev_Q = None
+        self.mle.prev_L = None
+        self.mle.prev_min_bcn_sumw = None
+        self.mle.prev_min_trg_sumw = None
+        self.mle.sumw = None
+        self.mle.ffgt_call_count = 0 # will act as an internal counter of FFGT-calls
+        self.mle.sum_bcn_uei = None
+        self.mle.sum_trg_uei = None
+        self.mle.sum_bcn_assoc = None
+        self.mle.sum_trg_assoc = None
+        self.mle.bcn_amp_factors = None
+        self.mle.trg_amp_factors = None
+        self.mle.sum_self_bcn_uei = None
+        self.mle.sum_self_trg_uei = None
+        self.mle.print_status = False
+        self.mle.rel_err_bound = True # by default, err_bound will be evaluated as worst-case relative to the FFGT output value  
+        self.mle.calc_grad2 = False
+        self.Numi = Xumi.shape[0]
+        
+        self.mle.x_umi = np.append(Xumi, np.zeros([self.Numi,2]),axis=1)
+        self.mle.x_umi_polynom_tuples_buff = np.zeros([self.Numi,len(self.mle.glo_indices)],dtype=np.double)
+        mean_pos = np.zeros(self.mle.spat_dims)
+        mean_sq_pos = np.zeros(self.mle.spat_dims)            
+        self.umi_incl_ffgt = np.zeros(self.Numi,dtype=np.bool_) # initiate as boolean array
+        tot_outliers = get_non_outliers(self.umi_incl_ffgt,
+                                        self.mle.x_umi[:,:self.mle.spat_dims],
+                                        mean_pos,mean_sq_pos,self.Numi,self.mle.spat_dims,5.0)
+        self.umi_incl_ffgt = np.arange(self.Numi,dtype=np.int64)[self.umi_incl_ffgt] # convert to index array
+        self.L, self.Q, self.min_x = self.mle.get_ffgt_args(self.mle.x_umi[self.umi_incl_ffgt,:])
+        
+        sysOps.throw_status('ffgtDotObj error-bounding arguments: L = ' + str(self.L) + ', Q = ' + str(self.L) + ', max_nu = ' + str(self.mle.max_nu))
+        self.has_bcn_arr = (local_sum_bcn_uei[self.umi_incl_ffgt] > 0) # crucially, has_bcn_arr and has_trg_arr are boolean arrays referring to the sub-set determined by umi_incl_ffgt
+        self.has_trg_arr = (local_sum_trg_uei[self.umi_incl_ffgt] > 0)
+        
+        self.mle.x_umi[self.umi_incl_ffgt[self.has_bcn_arr],self.mle.spat_dims] = 1.0
+        self.mle.x_umi[self.umi_incl_ffgt[self.has_trg_arr],self.mle.spat_dims+1] = 1.0
+        
+        self.mle.x_umi[:,:self.mle.spat_dims] /= np.sqrt(self.mle.s)
+        self.mle.norm_el = np.ones(self.Numi,dtype=np.float64)
+        self.add_csc_op = None
+        self.sumw = self.ffgt_dot(np.ones(self.Numi,dtype=np.float64))
+        
+        # modify inclusion as necessary to prevent numerical error
+        self.umi_incl_ffgt = np.multiply(self.umi_incl_ffgt,self.sumw > 0.0)
+        self.has_bcn_arr = (local_sum_bcn_uei[self.umi_incl_ffgt] > 0) # crucially, has_bcn_arr and has_trg_arr are boolean arrays referring to the sub-set determined by umi_incl_ffgt
+        self.has_trg_arr = (local_sum_trg_uei[self.umi_incl_ffgt] > 0)
+        
+        sysOps.throw_status('np.max(self.sumw[self.umi_incl_ffgt]) = ' + str(np.max(self.sumw[self.umi_incl_ffgt]) ) + ', np.min(self.sumw[self.umi_incl_ffgt]) = ' + str(np.min(self.sumw[self.umi_incl_ffgt]) ))
+        self.mle.norm_el = np.zeros(self.Numi,dtype=np.float64)
+        self.mle.norm_el[self.umi_incl_ffgt] = np.divide(1.0,np.sqrt(self.sumw[self.umi_incl_ffgt]))
+        self.add_csc_op = add_csc_op
+
+        sysOps.throw_status('Completed constructing ffgtDotObj.')
+        
+    def ffgt_dot(self,inp_weights):
+        # inp_weights will be of size self.Numi
+        # return local weights at stored points given input weights
+        # inp_weights should have length self.umi_incl_ffgt.shape[0]
+        
+        (min_exp_amp_bcn, min_exp_amp_trg, 
+         self.mle.prev_axial_bcn_fft, self.mle.prev_axial_trg_fft, 
+         Xbcn_grad_sub, Xtrg_grad_sub, 
+         bcn_umi_grad2, trg_umi_grad2) = call_ffgt(self.mle.x_umi[self.umi_incl_ffgt,:],
+                                                   self.has_bcn_arr,self.has_trg_arr,
+                                                   self.mle.x_umi_polynom_tuples_buff[self.umi_incl_ffgt,:],
+                                                   self.min_x,self.mle.glo_indices,self.L,self.Q,1.0,self.mle.max_nu,self.mle.spat_dims,False,False,False,
+                                                   np.multiply(self.mle.norm_el,inp_weights))
+         
+        self.mle.ffgt_call_count += 1
+        if self.mle.print_status:
+            sysOps.throw_status('self.mle.ffgt_call_count = ' + str(self.mle.ffgt_call_count))
+        if self.add_csc_op is None:
+            return np.multiply(self.mle.norm_el,
+                               np.add(Xbcn_grad_sub[:,self.mle.spat_dims], Xtrg_grad_sub[:,self.mle.spat_dims]))
+        else:
+            return 0.5*np.add(self.add_csc_op.dot(inp_weights), 
+                              np.add(-inp_weights,np.multiply(self.mle.norm_el,
+                                                              np.add(Xbcn_grad_sub[:,self.mle.spat_dims],
+                                                                     Xtrg_grad_sub[:,self.mle.spat_dims]))))    
+        
+        
 def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
     # Test function for FFGT N-body summation
     # Will simulate Nbcn beacons and Ntrg targets with positional variance randw
@@ -28,10 +115,14 @@ def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
     Xumi[:,spat_dims] = np.random.randn(Numi)
     Xumi[:,spat_dims+1] = np.random.randn(Numi)
     
+    grad2_dims = spat_dims + ((spat_dims*(spat_dims-1))/2)
     dXumi = np.zeros([Numi,spat_dims+2])
+    d2Xumi = np.zeros([Numi,grad2_dims])
     
     dx_bcn = np.zeros(spat_dims+2)
     dx_trg = np.zeros(spat_dims+2)
+    d2x_bcn = np.zeros(grad2_dims)
+    d2x_trg = np.zeros(grad2_dims)
     
     # Perform exact calculation
     sysOps.throw_status('Beginning exact ' + str(Nbcn) + 'x' + str(Ntrg) + ' computation.')
@@ -40,15 +131,28 @@ def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
             dx2 = np.sum(np.square(np.subtract(Xumi[i,:spat_dims],Xumi[j+Nbcn,:spat_dims])))
             dx_bcn[:] = 0.0
             dx_trg[:] = 0.0
-            
+            d2x_bcn[:] = 0.0
+            d2x_trg[:] = 0.0
+            on_grad2_index = 0
             # assign gradient coefficients (that will multiply exp_factor = w_{ij})
             dx_bcn[:spat_dims] = -(2.0/s)*np.subtract(Xumi[i,:spat_dims],Xumi[j+Nbcn,:spat_dims])
             dx_trg[:spat_dims] = -dx_bcn[:spat_dims]
             dx_bcn[spat_dims] = 1.0
             dx_trg[spat_dims+1] = 1.0
             exp_factor = np.exp(-(dx2/s) + Xumi[i,spat_dims] + Xumi[j+Nbcn,spat_dims+1])
+            for d in range(spat_dims):
+                for d2 in range(d+1):
+                    if d == d2:
+                        d2x_bcn[on_grad2_index] = -2.0/s
+                        d2x_trg[on_grad2_index] = -2.0/s
+                    d2x_bcn[on_grad2_index] += dx_bcn[d]*dx_bcn[d2]
+                    d2x_trg[on_grad2_index] += dx_trg[d]*dx_trg[d2]
+                    on_grad2_index += 1
+                    
             dXumi[i,:] += np.multiply(dx_bcn,exp_factor)
             dXumi[j+Nbcn,:] += np.multiply(dx_trg,exp_factor)
+            d2Xumi[i,:] += np.multiply(d2x_bcn,exp_factor)
+            d2Xumi[j+Nbcn,:] += np.multiply(d2x_trg,exp_factor)
 
     sysOps.throw_status('Completed exact computation. Continuing to test FFGT.')
     
@@ -67,7 +171,7 @@ def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
     umi_incl_ffgt = np.ones(this_mle.Numi,dtype=np.bool) #assign no outliers
     
     # call function to assign parameters on the basis of
-    L, Q, min_x = this_mle.get_ffgt_args(Xumi[umi_incl_ffgt,:])  
+    L, Q, min_x = this_mle.get_ffgt_args(Xumi[umi_incl_ffgt,:],0)  
     
     # Initial set up before call_ffgt(): ensure that all UMIs are accounted for in summation
     has_bcn_arr = np.zeros(this_mle.Numi,dtype=np.bool_)
@@ -78,10 +182,11 @@ def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
     # call FFGT to generate gradients and weight-sums
     (min_exp_amp_bcn, min_exp_amp_trg, 
      this_mle.prev_axial_bcn_fft, this_mle.prev_axial_trg_fft, 
-     Xbcn_grad_sub, Xtrg_grad_sub) = call_ffgt(Xumi[umi_incl_ffgt,:],
-                                             has_bcn_arr,has_trg_arr,
-                                             this_mle.x_umi_polynom_tuples_buff[umi_incl_ffgt,:],
-                                             min_x,this_mle.glo_indices,L,Q,this_mle.s,this_mle.max_nu,this_mle.spat_dims,True,True)
+     Xbcn_grad_sub, Xtrg_grad_sub, 
+     Xbcn_grad2_sub, Xtrg_grad2_sub) = call_ffgt(Xumi[umi_incl_ffgt,:],
+                                                 has_bcn_arr,has_trg_arr,
+                                                 this_mle.x_umi_polynom_tuples_buff[umi_incl_ffgt,:],
+                                                 min_x,this_mle.glo_indices,L,Q,this_mle.s,this_mle.max_nu,this_mle.spat_dims,True,True,True)
     
     sysOps.throw_status('Xbcn_grad.shape = ' + str(Xbcn_grad_sub.shape) + ' , Xtrg_grad.shape = ' + str(Xtrg_grad_sub.shape))
     sysOps.throw_status('Maximum bcn fractional error for 1st call: ' + 
@@ -99,6 +204,11 @@ def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
             outfile.write("0," + str(i) + "," + ','.join([str(s) for s in Xbcn_grad_sub[has_bcn_arr][i,:]]) + "," + ','.join([str(s) for s in dXumi[i,:]]) + "\n")
         for i in range(Ntrg):
             outfile.write("1," + str(i) + "," + ','.join([str(s) for s in Xtrg_grad_sub[has_trg_arr][i,:]]) + "," + ','.join([str(s) for s in dXumi[Nbcn+i,:]]) + "\n")
+    with open('test_ffgt1_hess.csv','w') as outfile:
+        for i in range(Nbcn):
+            outfile.write("0," + str(i) + "," + ','.join([str(s) for s in Xbcn_grad2_sub[has_bcn_arr][i,:]]) + "," + ','.join([str(s) for s in d2Xumi[i,:]]) + "\n")
+        for i in range(Ntrg):
+            outfile.write("1," + str(i) + "," + ','.join([str(s) for s in Xtrg_grad2_sub[has_trg_arr][i,:]]) + "," + ','.join([str(s) for s in d2Xumi[Nbcn+i,:]]) + "\n")
     this_mle.prev_Q = float(Q)
     this_mle.prev_L = float(L)
     this_mle.prev_min_bcn_sumw = np.min(Xbcn_grad_sub[has_bcn_arr][:,this_mle.spat_dims])
@@ -115,10 +225,11 @@ def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
     L, Q, min_x = this_mle.get_ffgt_args(Xumi[umi_incl_ffgt,:])
     (min_exp_amp_bcn, min_exp_amp_trg, 
      this_mle.prev_axial_bcn_fft, this_mle.prev_axial_trg_fft, 
-     Xbcn_grad_sub, Xtrg_grad_sub) = call_ffgt(Xumi[umi_incl_ffgt,:],
-                                             has_bcn_arr,has_trg_arr,
-                                             this_mle.x_umi_polynom_tuples_buff[umi_incl_ffgt,:],
-                                             min_x,this_mle.glo_indices,L,Q,this_mle.s,this_mle.max_nu,this_mle.spat_dims,True,True)
+     Xbcn_grad_sub, Xtrg_grad_sub,
+     Xbcn_grad2_sub, Xtrg_grad2_sub) = call_ffgt(Xumi[umi_incl_ffgt,:],
+                                                 has_bcn_arr,has_trg_arr,
+                                                 this_mle.x_umi_polynom_tuples_buff[umi_incl_ffgt,:],
+                                                 min_x,this_mle.glo_indices,L,Q,this_mle.s,this_mle.max_nu,this_mle.spat_dims,True,True,True)
      
     sysOps.throw_status('Maximum bcn fractional error for 2nd call: ' + 
                         str(np.max(np.divide(np.abs(np.subtract(Xbcn_grad_sub[has_bcn_arr,spat_dims],
@@ -135,11 +246,127 @@ def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
             outfile.write("0," + str(i) + "," + ','.join([str(s) for s in Xbcn_grad_sub[has_bcn_arr][i,:]]) + "," + ','.join([str(s) for s in dXumi[i,:]]) + "\n")
         for i in range(Ntrg):
             outfile.write("1," + str(i) + "," + ','.join([str(s) for s in Xtrg_grad_sub[has_trg_arr][i,:]]) + "," + ','.join([str(s) for s in dXumi[Nbcn+i,:]]) + "\n")
+    with open('test_ffgt2_hess.csv','w') as outfile:
+        for i in range(Nbcn):
+            outfile.write("0," + str(i) + "," + ','.join([str(s) for s in Xbcn_grad2_sub[has_bcn_arr][i,:]]) + "," + ','.join([str(s) for s in d2Xumi[i,:]]) + "\n")
+        for i in range(Ntrg):
+            outfile.write("1," + str(i) + "," + ','.join([str(s) for s in Xtrg_grad2_sub[has_trg_arr][i,:]]) + "," + ','.join([str(s) for s in d2Xumi[Nbcn+i,:]]) + "\n")
     this_mle.prev_Q = float(Q)
     this_mle.prev_L = float(L)
     this_mle.prev_min_bcn_sumw = np.min(Xbcn_grad_sub[has_bcn_arr][:,this_mle.spat_dims])
     this_mle.prev_min_trg_sumw = np.min(Xtrg_grad_sub[has_trg_arr][:,this_mle.spat_dims])
 
+def test_hdot():
+    # Test function for O(N) multiplication of the FULL Hessian matrix by an arbitrary vector
+    randw , s , spat_dims , Nbcn , Ntrg = 10.0, 1.0, 2, 1000, 1000
+    Numi = Nbcn + Ntrg
+    Xumi = randw*np.random.rand(Numi,spat_dims+2)
+    Xumi[:Nbcn,spat_dims] = np.random.randn(Nbcn)
+    Xumi[Nbcn:,spat_dims+1] = np.random.randn(Ntrg)
+    sysOps.throw_status('Completed exact computation. Continuing to test Hessian-FFGT.')
+    
+    Nassoc_per_umi = 100
+    uei_data = list()
+    for n in range(Nbcn):
+        uei_data.append(np.concatenate([[n*np.ones(Nassoc_per_umi,dtype=np.int64)],
+                                        [(Nbcn + np.random.choice(Ntrg,Nassoc_per_umi,False))],
+                                        [np.random.randint(1,10,Nassoc_per_umi)]],axis=0).T)
+    uei_data = np.concatenate(uei_data,axis = 0)
+    Nuei = np.sum(uei_data[:,2])
+    Nassoc = uei_data.shape[0]
+    
+    imagemodule_input_filename = 'test_hdot.csv'    
+    with open(sysOps.globaldatapath + 'seq_params_' + imagemodule_input_filename,'w') as params_file:
+        params_file.write('-Nbcn ' + str(int(Nbcn)) + '\n')         #total number of (analyzeable) bcn UMI's
+        params_file.write('-Ntrg ' + str(int(Ntrg)) + '\n')         #total number of (analyzeable) trg UMI's
+        params_file.write('-Nuei ' + str(int(Nuei)) + '\n')            #total number of UEI's
+        params_file.write('-Nassoc ' + str(int(Nassoc)) + '\n')          #total number of unique associations
+        params_file.write('-spat_dims ' + str(spat_dims) + '\n')    #output dimensionality
+        params_file.write('-err_bound ' + str(0.3) + '\n')          #maximum error
+    
+    np.savetxt(sysOps.globaldatapath + imagemodule_input_filename, uei_data, fmt='%i,%i,%i',delimiter=',')
+    this_mle = mleObj(imagemodule_input_filename)
+    os.remove(sysOps.globaldatapath + 'seq_params_' + imagemodule_input_filename)
+    os.remove(sysOps.globaldatapath + imagemodule_input_filename)
+    this_mle.bcn_amp_factors = np.array(Xumi[:,spat_dims])
+    this_mle.trg_amp_factors = np.array(Xumi[:,spat_dims+1])
+    myHdotObj = HdotObj(this_mle, Xumi[:,:spat_dims])
+    
+    # perform exact multiplication
+    exact_Hmat = np.zeros([Numi*spat_dims,Numi*spat_dims],dtype=np.float64)
+    
+    for n in range(Numi):
+        for d in range(spat_dims):
+            exact_Hmat[n*spat_dims + d,n*spat_dims + d] = -2.0*(this_mle.sum_bcn_uei[n] + this_mle.sum_trg_uei[n])
+    for i in range(Nassoc):
+        for d in range(spat_dims):
+            exact_Hmat[this_mle.uei_data[i,0]*spat_dims + d, 
+                       this_mle.uei_data[i,1]*spat_dims + d] = 2.0*this_mle.uei_data[i,2]
+                # will symmetrize later
+    
+    sumw = 0.0
+    sum_grad = np.zeros(Numi*spat_dims,dtype=np.float64)
+    for bcn_index in range(Nbcn):
+        for trg_index in range(Nbcn, Numi):
+            dx = np.subtract(Xumi[bcn_index,:spat_dims],Xumi[trg_index,:spat_dims])
+            dx2 = np.square(LA.norm(dx))
+            w = np.exp(-dx2 + Xumi[bcn_index,spat_dims]+ Xumi[trg_index,spat_dims+1])
+            sumw += w
+            sum_grad[(bcn_index*spat_dims):((bcn_index+1)*spat_dims)] += (-2.0*dx*w)
+            sum_grad[(trg_index*spat_dims):((trg_index+1)*spat_dims)] += (+2.0*dx*w)
+    
+    sum_grad2 = np.zeros([Numi,spat_dims,spat_dims],dtype=np.float64)
+    for umi_index1 in range(Numi):
+        for umi_index2 in range(umi_index1, Numi):
+            if umi_index1 < Nbcn:
+                amp_index1 = spat_dims
+            else:
+                amp_index1 = spat_dims+1
+            if umi_index2 >= Nbcn:
+                amp_index2 = spat_dims+1
+            else:
+                amp_index2 = spat_dims
+            dx = np.subtract(Xumi[umi_index1,:spat_dims],Xumi[umi_index2,:spat_dims])
+            dx2 = np.square(LA.norm(dx))
+            w = np.exp(-dx2 + Xumi[umi_index1,amp_index1]+ Xumi[umi_index2,amp_index2])
+            for d1 in range(spat_dims):
+                for d2 in range(spat_dims):
+                    if (umi_index1 < Nbcn and umi_index2 < Nbcn) or (umi_index1 >= Nbcn and umi_index2 >= Nbcn):
+                        exact_Hmat[umi_index1*spat_dims + d1,umi_index2*spat_dims + d2] += (Nuei/(sumw**2))*(sum_grad[umi_index1*spat_dims + d1]
+                                                                                                             *sum_grad[umi_index2*spat_dims + d2])
+                    else:
+                        mygrad2 = (4.0*dx[d1]*(-dx[d2]) + 2.0*int(d1 == d2))*w
+                        sum_grad2[umi_index1,d1,d2] -= mygrad2
+                        sum_grad2[umi_index2,d1,d2] -= mygrad2
+                        exact_Hmat[umi_index1*spat_dims + d1,umi_index2*spat_dims + d2] += +(Nuei/(sumw**2))*(sum_grad[umi_index1*spat_dims + d1]
+                                                                                                              *sum_grad[umi_index2*spat_dims + d2])
+                        exact_Hmat[umi_index1*spat_dims + d1,umi_index2*spat_dims + d2] += -(Nuei/sumw)*(mygrad2)
+                    
+                # will symmetrize exact_Hmat later
+    
+    # add in sum_grad2
+    for umi_index in range(Numi):
+        for d1 in range(spat_dims):
+            for d2 in range(spat_dims):
+                exact_Hmat[umi_index*spat_dims + d1,umi_index*spat_dims + d2] += -(Nuei/sumw)*sum_grad2[umi_index,d1,d2]
+    
+    # symmetrize
+    for n1 in range(Numi*spat_dims):
+        for n2 in range(n1):
+            exact_Hmat[n1,n2] = exact_Hmat[n2,n1]
+    
+    randvec_arr = np.zeros([Numi*spat_dims,spat_dims],dtype=np.float64)
+    randvec1 = np.random.randn(Numi)
+    randvec_arr[np.arange(0,Numi*spat_dims,2),0] = randvec1
+    randvec_arr[np.arange(1,Numi*spat_dims,2),1] = randvec1
+    np.savetxt('test_Hdot1.csv',np.concatenate([myHdotObj.Hdot(randvec_arr).reshape([Numi*spat_dims,2]),
+                                                -exact_Hmat.dot(randvec_arr).reshape([Numi*spat_dims,2])],axis=1),fmt='%.10e',delimiter=',')
+    randvec2 = np.random.randn(Numi)
+    randvec_arr[np.arange(0,Numi*spat_dims,2),0] = randvec2
+    randvec_arr[np.arange(1,Numi*spat_dims,2),1] = randvec2
+    np.savetxt('test_Hdot2.csv',np.concatenate([myHdotObj.Hdot(randvec_arr).reshape([Numi*spat_dims,2]),
+                                                -exact_Hmat.dot(randvec_arr).reshape([Numi*spat_dims,2])],axis=1),fmt='%.10e',delimiter=',')
+    
     
 def get_glo_indices(max_nu,spat_dims):
     # GLO = graded lexicographic order
@@ -168,7 +395,6 @@ def get_glo_indices(max_nu,spat_dims):
 
     return glo_indices
 
-
 def pt_mle(sub_mle,output_Xumi_filename):
     # perform unstructured "point-MLE" likelihood maximization
     
@@ -186,12 +412,13 @@ def pt_mle(sub_mle,output_Xumi_filename):
                fmt='%.10e',delimiter=',')
     return
 
-
 def spec_mle(sub_mle, output_Xumi_filename = None):
     # perform structured "spectral MLE" (sMLE) likelihood maximization
 
     for i in range(sub_mle.seq_evecs.shape[0]): # normalize (just in case)
         sub_mle.seq_evecs[i,:] /= LA.norm(sub_mle.seq_evecs[i,:])
+
+    sub_mle.spat_dims = 3
         
     submle_eignum = int(sub_mle.max_nontriv_eigenvec_to_calculate)
     all_seq_evecs = np.array(sub_mle.seq_evecs)
@@ -210,7 +437,7 @@ def spec_mle(sub_mle, output_Xumi_filename = None):
         sub_mle.seq_evecs = all_seq_evecs[:eig_count,:] # set eigenvectors to sub-set
         
         # pre-calculate back-projection matrix: calculate inner-product of eigenvector matrix with itself, and invert to compensate for lack of orthogonalization between eigenvectors 
-        sub_mle.backproj_mat = sub_mle.seq_evecs.transpose().dot(LA.inv(sub_mle.seq_evecs.dot(sub_mle.seq_evecs.transpose())))
+        sub_mle.backproj_mat = sub_mle.seq_evecs.transpose().dot(LA.pinv(sub_mle.seq_evecs.dot(sub_mle.seq_evecs.transpose())))
         
         res = minimize(fun=sub_mle.calc_grad, 
                        x0=np.reshape(X,sub_mle.max_nontriv_eigenvec_to_calculate*sub_mle.spat_dims),
@@ -222,12 +449,18 @@ def spec_mle(sub_mle, output_Xumi_filename = None):
             my_Xumi = sub_mle.seq_evecs.transpose().dot(X)
             if not (output_Xumi_filename is None):
                 np.savetxt(sysOps.globaldatapath +output_Xumi_filename,
-                           np.concatenate([sub_mle.index_key.reshape([sub_mle.Numi,1]), my_Xumi],axis = 1),fmt='%i,%.10e,%.10e',delimiter=',')
+                           np.concatenate([sub_mle.index_key.reshape([sub_mle.Numi,1]), my_Xumi],axis = 1),fmt='%i,' + ','.join(['%.10e' for i in range(my_Xumi.shape[1])]),delimiter=',')
                 
-                return
+                return my_Xumi
             else:
                 break
-
+        '''
+        elif eig_count%5 == 0: # can include to get regular updates on the solution at regular intervals
+            my_Xumi = sub_mle.seq_evecs.transpose().dot(X)
+            np.savetxt(sysOps.globaldatapath + 'iter' + str(eig_count) + '_' + output_Xumi_filename,
+                       np.concatenate([sub_mle.index_key.reshape([sub_mle.Numi,1]), my_Xumi],axis = 1),fmt='%i,' + ','.join(['%.10e' for i in range(my_Xumi.shape[1])]),delimiter=',')
+        '''
+            
 # NUMBA declaration
 @jit("void(int64[:,:],int64[:],int64[:,:],int64[:],int64[:],int64[:],bool_[:],bool_[:],int64)",nopython=True)
 def sum_ueis_and_reassign_indices(bcn_sorted_uei_data,bcn_sorted_uei_data_starts,
@@ -638,16 +871,27 @@ def run_mle(imagemodule_input_filename, smle = False, multiscale = False, segmen
                 break
             
         sysOps.throw_status('All segmentations found computed.')
-    elif smle and not multiscale and not sysOps.check_file_exists('Xumi_uniscale_' + imagemodule_input_filename):
+    elif smle and not multiscale:
+        
+        # run test for 3D FFGT
+        # sysOps.throw_status('Testing 3DM ...')
+        # test_ffgt(randw = 10, s = 1.0, spat_dims = 3, Nbcn = 1000, Ntrg = 1000)
+        
         sysOps.throw_status('Running sMLE. Initiating ...')
         this_mle.max_nontriv_eigenvec_to_calculate = 100
         this_mle.eigen_decomp(imagemodule_input_filename)
+        output_Xumi_filename = 'Xumi_smle_' + imagemodule_input_filename
         this_mle.print_status = False
-        spec_mle(this_mle, output_Xumi_filename = 'Xumi_smle_' + imagemodule_input_filename)
+        this_mle.spat_dims = 3
+        sysOps.throw_status('sMLE with spat_dims=' + str(this_mle.spat_dims))
+        spec_mle(this_mle, output_Xumi_filename)
+        
     elif not sysOps.check_file_exists('Xumi_pt_' + imagemodule_input_filename):
         sysOps.throw_status('Running ptMLE. Initiating eigenvectors ...')
         this_mle.max_nontriv_eigenvec_to_calculate = 100
         this_mle.eigen_decomp(imagemodule_input_filename)
+        this_mle.spat_dims = 3
+        sysOps.throw_status('ptMLE with spat_dims=' + str(this_mle.spat_dims))
         sysOps.throw_status('Continuing optimization ...')
         pt_mle(this_mle,'Xumi_pt_' + imagemodule_input_filename)
     else:
@@ -714,6 +958,9 @@ class mleObj:
         self.prev_axial_trg_fft = None
         self.prev_Q = None
         self.prev_L = None
+        self.Q = None
+        self.L = None
+        self.min_x = None
         self.prev_min_bcn_sumw = None
         self.prev_min_trg_sumw = None
         self.sumw = None
@@ -729,7 +976,7 @@ class mleObj:
         self.Numi = None
         self.print_status = True
         self.rel_err_bound = True # by default, err_bound will be evaluated as worst-case relative to the FFGT output value  
-        
+        self.calc_grad2 = False
         # counts and indices in inp_data, if this is included in input, take precedence over read-in numbers from inp_settings and imagemodule_input_filename
         
         if type(inp_settings) == dict:
@@ -853,6 +1100,7 @@ class mleObj:
             if self.print_status:
                 sysOps.throw_status('Using maximum polynomial order ' + str(self.max_nu) + ' to achieve (1+eps_nu)^2 < 1 + ' +str(self.err_bound) + '. Assembling GLO indices.')
             self.glo_indices = get_glo_indices(self.max_nu,self.spat_dims)
+            sysOps.throw_status('glo_indices shape: ' + str(self.glo_indices.shape))
             
             # allocate memory for FFGT calls
             self.x_umi_polynom_tuples_buff = np.zeros([self.Numi,len(self.glo_indices)],dtype=np.double)
@@ -869,10 +1117,6 @@ class mleObj:
                 if self.print_status:
                     sysOps.throw_status('No max_nontriv_eigenvec_to_calculate value entered. Proceeding with non-spectral MLE.')
                 self.max_nontriv_eigenvec_to_calculate = None
-        
-        import pickle
-        with open(os.path.expanduser('~/Downloads/weinstein-mleobj.pkl'), 'wb') as fp:
-            pickle.dump(self.__dict__, fp)
             
         
     def load_data(self,infilename,inp_data=None):
@@ -1241,101 +1485,105 @@ class mleObj:
         
         return L, Q, min_x
             
-    def calc_grad(self, X):
-        # FUnction is called on 1D array of EITHER positions OR eigenvector coefficients (which it is will be known to function based on whether self.seq_evecs is None)
-        
+    def calc_grad(self, X, set_calc_grad2 = False):
+        # Function is called on 1D array of EITHER positions OR eigenvector coefficients (which it is will be known to function based on whether self.seq_evecs is None)
+        self.calc_grad2 = set_calc_grad2
         # uei_data is a (Nassoc x 3) numpy array
         # self.prev_axial_fft should be spat_dims x (2 x self.prev_Q + 1)
-        Xumi = np.zeros([self.Numi,self.spat_dims+2],dtype=np.float64)
+        
+        self.x_umi = np.zeros([self.Numi,self.spat_dims+2],dtype=np.float64)
               
         # first Numi elements of X will always be amplification factors 
         if not(self.seq_evecs is None):
-            Xumi[:,:self.spat_dims] = self.seq_evecs.transpose().dot(np.reshape(X,[self.seq_evecs.shape[0],self.spat_dims]))
+            self.x_umi[:,:self.spat_dims] = self.seq_evecs.transpose().dot(np.reshape(X,[self.seq_evecs.shape[0],self.spat_dims]))
         else:
             # if MLE is not being calculated as spectral projection, then:
             #     first Numi elements of X will correspond to spatial dimension 0
             #     second Numi elements of X will correspond to spatial dimension 1 ... etc
-            Xumi[:,:self.spat_dims] = np.reshape(X,[self.Numi,self.spat_dims])
-        
-        Xumi[:,self.spat_dims] = self.bcn_amp_factors
-        Xumi[:,self.spat_dims + 1] = self.trg_amp_factors
+            self.x_umi[:,:self.spat_dims] = np.reshape(X,[self.Numi,self.spat_dims])
+
+        self.x_umi[:,self.spat_dims] = self.bcn_amp_factors
+        self.x_umi[:,self.spat_dims + 1] = self.trg_amp_factors
         ffgt_internal_count = 0
         corrected_gradients = 0
-        
+
         # Here, we apply the criterion that outlier points (lying >5 x sigma from mean position) are not included in the FFGT calculation
-         
+
         mean_pos = np.zeros(self.spat_dims)
         mean_sq_pos = np.zeros(self.spat_dims)            
-        
-        umi_incl_ffgt = np.zeros(self.Numi,dtype=np.bool_) # initiate as boolean array
-        
-        tot_outliers = get_non_outliers(umi_incl_ffgt,Xumi[:,:self.spat_dims],mean_pos,mean_sq_pos,self.Numi,self.spat_dims,5.0)
-        umi_incl_ffgt = np.arange(self.Numi,dtype=np.int64)[umi_incl_ffgt] # convert to index array
-        
+
+        self.umi_incl_ffgt = np.zeros(self.Numi,dtype=np.bool_) # initiate as boolean array
+
+        tot_outliers = get_non_outliers(self.umi_incl_ffgt,self.x_umi[:,:self.spat_dims],mean_pos,mean_sq_pos,self.Numi,self.spat_dims,5.0)
+        self.umi_incl_ffgt = np.arange(self.Numi,dtype=np.int64)[self.umi_incl_ffgt] # convert to index array
+
         default_max_Q = 100.0
-        has_bcn_arr = ((self.sum_bcn_uei[umi_incl_ffgt]+self.sum_self_bcn_uei[umi_incl_ffgt]) > 0) # crucially, has_bcn_arr and has_trg_arr are boolean arrays referring to the sub-set determined by umi_incl_ffgt
-        has_trg_arr = ((self.sum_trg_uei[umi_incl_ffgt]+self.sum_self_trg_uei[umi_incl_ffgt]) > 0)
-        
+        has_bcn_arr = ((self.sum_bcn_uei[self.umi_incl_ffgt]+self.sum_self_bcn_uei[self.umi_incl_ffgt]) > 0) # crucially, has_bcn_arr and has_trg_arr are boolean arrays referring to the sub-set determined by umi_incl_ffgt
+        has_trg_arr = ((self.sum_trg_uei[self.umi_incl_ffgt]+self.sum_self_trg_uei[self.umi_incl_ffgt]) > 0)
+
         while True:
             # This loop exists to ensure that values of L and Q are appropriate --> if not, will update accordingly
-            
-            L, Q, min_x = self.get_ffgt_args(Xumi[umi_incl_ffgt,:])
-            
+
+            self.L, self.Q, self.min_x = self.get_ffgt_args(self.x_umi[self.umi_incl_ffgt,:])
+            # import ipdb; ipdb.set_trace()
+
             if ffgt_internal_count == 0:
-                Q = np.ceil(1.1*Q) # being conservative with initial estimate
+                self.Q = np.ceil(1.1*self.Q) # being conservative with initial estimate
                 if self.print_status:
-                    sysOps.throw_status('Calling FFGT with L = ' + str(L) + ', Q = ' + str(Q) + ', max_nu = ' + str(self.max_nu))
-            elif (ffgt_internal_count > 0 and L <= self.prev_L and Q <= self.prev_Q) or self.prev_Q == default_max_Q:
+                    sysOps.throw_status('Calling FFGT with L = ' + str(self.L) + ', Q = ' + str(self.Q) + ', max_nu = ' + str(self.max_nu))
+            elif (ffgt_internal_count > 0 and self.L <= self.prev_L and self.Q <= self.prev_Q) or self.prev_Q == default_max_Q:
                 if self.print_status:
                     if corrected_gradients > 0:
                         sysOps.throw_status('Corrected ' + str(corrected_gradients) + ' gradients.')
                     sysOps.throw_status(str(tot_outliers) + ' outliers excluded from partition function.')
                 break
             elif ffgt_internal_count > 0:
-                Q = np.ceil(1.2*self.prev_Q)
+                self.Q = np.ceil(1.2*self.prev_Q)
                 if self.print_status:
-                    sysOps.throw_status('On sub-iteration ' + str(ffgt_internal_count) + ' calling with L = ' + str(L) + ', Q = ' + str(Q) + '. ' + str(tot_outliers) + ' outliers excluded from partition function.')
-            if Q>default_max_Q:
+                    sysOps.throw_status('On sub-iteration ' + str(ffgt_internal_count) + ' calling with L = ' + str(self.L) + ', Q = ' + str(self.Q) + '. ' + str(tot_outliers) + ' outliers excluded from partition function.')
+            if self.Q>default_max_Q:
                 if self.print_status:
                     sysOps.throw_status('Over-sized memory requested. Setting Q to max value of ' + str(default_max_Q) + '.')
-                Q = float(default_max_Q)
+                self.Q = float(default_max_Q)
 
             (min_exp_amp_bcn, min_exp_amp_trg, 
-             self.prev_axial_bcn_fft, self.prev_axial_trg_fft, 
-             Xbcn_grad_sub, Xtrg_grad_sub) = call_ffgt(Xumi[umi_incl_ffgt,:],
-                                                     has_bcn_arr,has_trg_arr,
-                                                     self.x_umi_polynom_tuples_buff[umi_incl_ffgt,:],
-                                                     min_x,self.glo_indices,L,Q,self.s,self.max_nu,self.spat_dims,True,True)
-             
+             this_prev_axial_bcn_fft, this_prev_axial_trg_fft, 
+             Xbcn_grad_sub, Xtrg_grad_sub, 
+             Xbcn_grad2_sub, Xtrg_grad2_sub) = call_ffgt(self.x_umi[self.umi_incl_ffgt,:],
+                                                         has_bcn_arr,has_trg_arr,
+                                                         self.x_umi_polynom_tuples_buff[self.umi_incl_ffgt,:],
+                                                         self.min_x,self.glo_indices,self.L,self.Q,self.s,self.max_nu,self.spat_dims,True,True,self.calc_grad2)
+            self.prev_axial_bcn_fft = this_prev_axial_bcn_fft
+            self.prev_axial_trg_fft = this_prev_axial_trg_fft
             self.ffgt_call_count += 1
             # Xbcn_grad_sub and Xtrg_grad_sub will both be of size Numi x (spat_dims+1) with the final column containing the gradient with respect to the amplification factor
-            
+
             # assign internal variables for next iteration
-            self.prev_Q = float(Q)
-            self.prev_L = float(L)
+            self.prev_Q = float(self.Q)
+            self.prev_L = float(self.L)
             self.prev_min_bcn_sumw = np.min(Xbcn_grad_sub[has_bcn_arr,self.spat_dims])
             self.prev_min_trg_sumw = np.min(Xtrg_grad_sub[has_trg_arr,self.spat_dims])
-            
+
             min_relevant_weight = min(min_exp_amp_bcn,min_exp_amp_trg) # minimum acceptable weight is assigned to the minimum exponentiated amplification factor 
                                                                        # (on the order of the absolute minimum what we'd expect for any point that is in communication with some other arbitrarily chosen point)
-            
+
             if self.prev_min_bcn_sumw < min_relevant_weight or self.prev_min_trg_sumw < min_relevant_weight:
                 corrected_gradients = 0
-                
+
                 bcn_corr = np.where(Xbcn_grad_sub[has_bcn_arr,self.spat_dims] < min_relevant_weight)[0]
                 corrected_gradients += len(bcn_corr)
                 Xbcn_grad_sub[has_bcn_arr,:][bcn_corr,:] = np.multiply(Xbcn_grad_sub[bcn_corr,:],np.random.uniform(-1.0,1.0,[len(bcn_corr),self.spat_dims+1])) 
                 # direction of "repulsive" force randomized, since given its extremely small magnitude, it is error-prone
                 self.prev_min_bcn_sumw = float(min_relevant_weight) # this memory will be retained for the next time get_ffgt_args() is called
-                
+
                 trg_corr = np.where(Xtrg_grad_sub[has_trg_arr,self.spat_dims] < min_relevant_weight)[0]
                 corrected_gradients += len(trg_corr)
                 Xtrg_grad_sub[has_trg_arr,:][trg_corr,:] = np.multiply(Xtrg_grad_sub[trg_corr,:],np.random.uniform(-1.0,1.0,[len(trg_corr),self.spat_dims+1])) 
                 # direction of "repulsive" force randomized, since given its extremely small magnitude, it is error-prone
                 self.prev_min_trg_sumw = float(min_relevant_weight)
-            
+
             ffgt_internal_count += 1
-            
+                        
         sumw_bcn = np.sum(Xbcn_grad_sub[has_bcn_arr,self.spat_dims]) 
         sumw_trg = np.sum(Xtrg_grad_sub[has_trg_arr,self.spat_dims])
         
@@ -1346,16 +1594,29 @@ class mleObj:
         
         dXbcn = np.zeros([self.Numi,self.spat_dims],dtype=np.float64)
         dXtrg = np.zeros([self.Numi,self.spat_dims],dtype=np.float64)
-        dXbcn[umi_incl_ffgt,:] = np.multiply(-(self.Nuei/self.sumw),Xbcn_grad_sub[:,:self.spat_dims])
-        dXtrg[umi_incl_ffgt,:] = np.multiply(-(self.Nuei/self.sumw),Xtrg_grad_sub[:,:self.spat_dims])
+        dXbcn[self.umi_incl_ffgt,:] = np.multiply(-(self.Nuei/self.sumw),Xbcn_grad_sub[:,:self.spat_dims])
+        dXtrg[self.umi_incl_ffgt,:] = np.multiply(-(self.Nuei/self.sumw),Xtrg_grad_sub[:,:self.spat_dims])
         
         # add convex (UEI-data) portion of gradients
-        
-        log_likelihood = add_convex_components(Xumi,dXbcn,dXtrg,self.uei_data,self.sumw,self.Nuei,self.Nassoc,self.s,self.spat_dims)
+        # (Xumi,dXbcn,dXtrg,uei_data,sumw,Nuei,Nassoc,s,spat_dims):
+        log_likelihood = add_convex_components(self.x_umi,dXbcn,dXtrg,self.uei_data,
+                                               self.sumw,self.Nuei,self.Nassoc,self.s,self.spat_dims)
             
+        if self.calc_grad2:      
+            grad2_dims = self.spat_dims + ((self.spat_dims*(self.spat_dims-1))/2)   
+            Xbcn_grad = np.zeros([self.Numi,self.spat_dims],dtype=np.float64)
+            Xtrg_grad = np.zeros([self.Numi,self.spat_dims],dtype=np.float64) 
+            Xbcn_grad2 = np.zeros([self.Numi,grad2_dims],dtype=np.float64)
+            Xtrg_grad2 = np.zeros([self.Numi,grad2_dims],dtype=np.float64)   
+            Xbcn_grad[self.umi_incl_ffgt,:] = Xbcn_grad_sub[:,:self.spat_dims]
+            Xtrg_grad[self.umi_incl_ffgt,:] = Xtrg_grad_sub[:,:self.spat_dims]
+            Xbcn_grad2[self.umi_incl_ffgt,:] = Xbcn_grad2_sub
+            Xtrg_grad2[self.umi_incl_ffgt,:] = Xtrg_grad2_sub
+            return log_likelihood, np.add(Xbcn_grad, Xtrg_grad), np.add(Xbcn_grad2, Xtrg_grad2), -np.add(dXbcn,dXtrg) 
+        
         if self.print_status:
             sysOps.throw_status('Log-likelihood = ' + str(log_likelihood))
-        
+            
         if not(self.seq_evecs is None):
             evec_num = self.seq_evecs.shape[0]
             dX = np.zeros([evec_num,self.spat_dims],dtype=np.float64)
@@ -1474,11 +1735,24 @@ def add_xtuples_to_grid2d(bcn_spat_field,trg_spat_field,bcn_amp_factors,trg_amp_
         bcn_spat_field[x_umi_grid_indices[n,0],x_umi_grid_indices[n,1]] += bcn_amp_factors[n]*x_polynom_tuples[n]
         trg_spat_field[x_umi_grid_indices[n,0],x_umi_grid_indices[n,1]] += trg_amp_factors[n]*x_polynom_tuples[n]
 
+@jit("void(float64[:,:,:],float64[:,:,:],float64[:],float64[:],int64[:,:],float64[:],int64)",nopython=True)
+def add_xtuples_to_grid3d(bcn_spat_field,trg_spat_field,bcn_amp_factors,trg_amp_factors,x_umi_grid_indices,x_polynom_tuples,Numi):
+    for n in range(Numi):
+        bcn_spat_field[x_umi_grid_indices[n,0],x_umi_grid_indices[n,1],x_umi_grid_indices[n,2]] += bcn_amp_factors[n]*x_polynom_tuples[n]
+        trg_spat_field[x_umi_grid_indices[n,0],x_umi_grid_indices[n,1],x_umi_grid_indices[n,2]] += trg_amp_factors[n]*x_polynom_tuples[n]
+
 @jit("void(float64[:],float64[:],float64[:,:],float64[:,:],float64[:],float64[:],int64[:,:],float64[:],int64)",nopython=True)
 def add_xtuples_to_vector2d(bcn_x_grad,trg_x_grad,bcn_spat_field,trg_spat_field,bcn_amp_factors,trg_amp_factors,x_umi_grid_indices,x_polynom_tuples,Numi):
     for n in range(Numi):
         bcn_x_grad[n] += x_polynom_tuples[n]*bcn_amp_factors[n]*trg_spat_field[x_umi_grid_indices[n,0],x_umi_grid_indices[n,1]]
         trg_x_grad[n] += x_polynom_tuples[n]*trg_amp_factors[n]*bcn_spat_field[x_umi_grid_indices[n,0],x_umi_grid_indices[n,1]]
+
+
+@jit("void(float64[:],float64[:],float64[:,:,:],float64[:,:,:],float64[:],float64[:],int64[:,:],float64[:],int64)",nopython=True)
+def add_xtuples_to_vector3d(bcn_x_grad,trg_x_grad,bcn_spat_field,trg_spat_field,bcn_amp_factors,trg_amp_factors,x_umi_grid_indices,x_polynom_tuples,Numi):
+    for n in range(Numi):
+        bcn_x_grad[n] += x_polynom_tuples[n]*bcn_amp_factors[n]*trg_spat_field[x_umi_grid_indices[n,0],x_umi_grid_indices[n,1],x_umi_grid_indices[n,2]]
+        trg_x_grad[n] += x_polynom_tuples[n]*trg_amp_factors[n]*bcn_spat_field[x_umi_grid_indices[n,0],x_umi_grid_indices[n,1],x_umi_grid_indices[n,2]]
 
 def obj_glo_loop(q_polynom_tuples, 
                  bcn_amp_factors, trg_amp_factors,
@@ -1494,7 +1768,9 @@ def obj_glo_loop(q_polynom_tuples,
         bcn_freq_field += np.fft.fft2(bcn_spat_field)
         trg_freq_field += np.fft.fft2(trg_spat_field)
     else:
-        sysOps.exitProgram()
+        add_xtuples_to_grid3d(bcn_spat_field.real,trg_spat_field.real,bcn_amp_factors,trg_amp_factors,x_umi_grid_indices,x_umi_polynom_tuples[:,0],Numi)
+        bcn_freq_field += np.fft.fftn(bcn_spat_field)
+        trg_freq_field += np.fft.fftn(trg_spat_field)
         
     prev_order_final_index = 0
  
@@ -1512,7 +1788,10 @@ def obj_glo_loop(q_polynom_tuples,
                     bcn_freq_field += np.multiply(np.fft.fft2(bcn_spat_field),q_polynom_tuples[:,:,on_glo_index])
                     trg_freq_field += np.multiply(np.fft.fft2(trg_spat_field),q_polynom_tuples[:,:,on_glo_index])
                 else:
-                    sysOps.exitProgram()
+                    q_polynom_tuples[:,:,:,on_glo_index] = np.multiply(q_polynom_tuples[:,:,:,j],np.multiply(q_grid[d],1j*2*np.pi/(L*glo_indices[on_glo_index,d])))
+                    add_xtuples_to_grid3d(bcn_spat_field.real,trg_spat_field.real,bcn_amp_factors,trg_amp_factors,x_umi_grid_indices,x_umi_polynom_tuples[:,on_glo_index],Numi)
+                    bcn_freq_field += np.multiply(np.fft.fftn(bcn_spat_field),q_polynom_tuples[:,:,:,on_glo_index])
+                    trg_freq_field += np.multiply(np.fft.fftn(trg_spat_field),q_polynom_tuples[:,:,:,on_glo_index])
                 
                 on_glo_index+=1
             
@@ -1520,28 +1799,41 @@ def obj_glo_loop(q_polynom_tuples,
         
         prev_order_final_index = on_glo_index-1
   
+
 def src_glo_loop(bcn_umi_grad, trg_umi_grad, 
                  bcn_amp_factors,trg_amp_factors,
-                 q_polynom_tuples, grad_factor_field, bcn_spat_field, trg_spat_field, bcn_freq_field, trg_freq_field, Numi, x_umi_polynom_tuples_buff, x_umi_vec_from_ctrs, x_umi_grid_indices, q_grid, glo_indices, L, max_nu, spat_dims, positional_grad = True):
+                 q_polynom_tuples, grad_factor_field, bcn_freq_field, trg_freq_field, Numi, x_umi_polynom_tuples_buff, x_umi_vec_from_ctrs, x_umi_grid_indices, max_nu, spat_dims, grad_dims, positional_grad = True, positional_grad2 = False):
      
+    # note: it is possible for grad_dims != spat_dims when second derivative is being computed instead of the first
+    # note: only real values of ifft are retained since all other factors in the product add_xtuples_to_vector2d() are real, and the output of call_ffgt is real 
     diag_term_indices = np.zeros(spat_dims,dtype=np.int64)
     
     if spat_dims == 2:
         if positional_grad:
-            for d2 in range(spat_dims):
+            for d2 in range(grad_dims):
                 add_xtuples_to_vector2d(bcn_umi_grad[:,d2],trg_umi_grad[:,d2],
                                         (np.fft.ifft2(np.multiply(grad_factor_field[d2],np.multiply(bcn_freq_field,q_polynom_tuples[:,:,0])))).real,
                                         (np.fft.ifft2(np.multiply(grad_factor_field[d2],np.multiply(trg_freq_field,q_polynom_tuples[:,:,0])))).real,
                                         bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,0],Numi)
            
-
-        add_xtuples_to_vector2d(bcn_umi_grad[:,spat_dims],trg_umi_grad[:,spat_dims],
-                                (np.fft.ifft2(np.multiply(bcn_freq_field,q_polynom_tuples[:,:,0]))).real,
-                                (np.fft.ifft2(np.multiply(trg_freq_field,q_polynom_tuples[:,:,0]))).real,
-                                bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,0],Numi)
-            
+        if not positional_grad2:
+            add_xtuples_to_vector2d(bcn_umi_grad[:,spat_dims],trg_umi_grad[:,spat_dims],
+                                    (np.fft.ifft2(np.multiply(bcn_freq_field,q_polynom_tuples[:,:,0]))).real,
+                                    (np.fft.ifft2(np.multiply(trg_freq_field,q_polynom_tuples[:,:,0]))).real,
+                                    bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,0],Numi)
     else:
-        sysOps.exitProgram()
+        if positional_grad:
+            for d2 in range(grad_dims):
+                add_xtuples_to_vector3d(bcn_umi_grad[:,d2],trg_umi_grad[:,d2],
+                                        (np.fft.ifftn(np.multiply(grad_factor_field[d2],np.multiply(bcn_freq_field,q_polynom_tuples[:,:,:,0])))).real,
+                                        (np.fft.ifftn(np.multiply(grad_factor_field[d2],np.multiply(trg_freq_field,q_polynom_tuples[:,:,:,0])))).real,
+                                        bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,0],Numi)
+           
+        if not positional_grad2:
+            add_xtuples_to_vector3d(bcn_umi_grad[:,spat_dims],trg_umi_grad[:,spat_dims],
+                                    (np.fft.ifftn(np.multiply(bcn_freq_field,q_polynom_tuples[:,:,:,0]))).real,
+                                    (np.fft.ifftn(np.multiply(trg_freq_field,q_polynom_tuples[:,:,:,0]))).real,
+                                    bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,0],Numi)
         
     prev_order_final_index = 0
  
@@ -1554,19 +1846,32 @@ def src_glo_loop(bcn_umi_grad, trg_umi_grad,
             
                 if spat_dims == 2:   
                     if positional_grad:
-                        for d2 in range(spat_dims):
+                        for d2 in range(grad_dims):
                             add_xtuples_to_vector2d(bcn_umi_grad[:,d2],trg_umi_grad[:,d2],
                                                     (np.fft.ifft2(np.multiply(grad_factor_field[d2],np.multiply(bcn_freq_field,q_polynom_tuples[:,:,on_glo_index])))).real,
                                                     (np.fft.ifft2(np.multiply(grad_factor_field[d2],np.multiply(trg_freq_field,q_polynom_tuples[:,:,on_glo_index])))).real,
                                                     bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,on_glo_index],Numi)
                             
-                    add_xtuples_to_vector2d(bcn_umi_grad[:,spat_dims],trg_umi_grad[:,spat_dims],
-                                            (np.fft.ifft2(np.multiply(bcn_freq_field,q_polynom_tuples[:,:,on_glo_index]))).real,
-                                            (np.fft.ifft2(np.multiply(trg_freq_field,q_polynom_tuples[:,:,on_glo_index]))).real,
-                                            bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,on_glo_index],Numi)
+                    if not positional_grad2:
+                        add_xtuples_to_vector2d(bcn_umi_grad[:,spat_dims],trg_umi_grad[:,spat_dims],
+                                                (np.fft.ifft2(np.multiply(bcn_freq_field,q_polynom_tuples[:,:,on_glo_index]))).real,
+                                                (np.fft.ifft2(np.multiply(trg_freq_field,q_polynom_tuples[:,:,on_glo_index]))).real,
+                                                bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,on_glo_index],Numi)
                         
                 else:
-                    sysOps.exitProgram()
+                    if positional_grad:
+                        for d2 in range(grad_dims):
+                            add_xtuples_to_vector3d(bcn_umi_grad[:,d2],trg_umi_grad[:,d2],
+                                                    (np.fft.ifftn(np.multiply(grad_factor_field[d2],np.multiply(bcn_freq_field,q_polynom_tuples[:,:,:,on_glo_index])))).real,
+                                                    (np.fft.ifftn(np.multiply(grad_factor_field[d2],np.multiply(trg_freq_field,q_polynom_tuples[:,:,:,on_glo_index])))).real,
+                                                    bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,on_glo_index],Numi)
+                            
+                    if not positional_grad2:
+                        add_xtuples_to_vector3d(bcn_umi_grad[:,spat_dims],trg_umi_grad[:,spat_dims],
+                                                (np.fft.ifftn(np.multiply(bcn_freq_field,q_polynom_tuples[:,:,:,on_glo_index]))).real,
+                                                (np.fft.ifftn(np.multiply(trg_freq_field,q_polynom_tuples[:,:,:,on_glo_index]))).real,
+                                                bcn_amp_factors,trg_amp_factors, x_umi_grid_indices,x_umi_polynom_tuples_buff[:,on_glo_index],Numi)
+                        
                     
                 on_glo_index+=1
             
@@ -1575,7 +1880,7 @@ def src_glo_loop(bcn_umi_grad, trg_umi_grad,
         prev_order_final_index = on_glo_index-1
 
 def call_ffgt(x_umi,has_bcn_arr,has_trg_arr,x_umi_polynom_tuples_buff,min_x,glo_indices,L,Q,s,max_nu,spat_dims,
-              do_exponentiate=True,positional_grad=True):
+              do_exponentiate=True,positional_grad=True,positional_grad2=False, inp_weights = None):
     # variables:
     #    Q,r
     #    function call requires x_bcn and x_trg are:
@@ -1618,7 +1923,8 @@ def call_ffgt(x_umi,has_bcn_arr,has_trg_arr,x_umi_polynom_tuples_buff,min_x,glo_
     if spat_dims == 2:
         q_grid = np.fft.ifftshift(np.meshgrid(np.arange(-Q,Q+1,dtype=np.double),np.arange(-Q,Q+1,dtype=np.double)))
     else:
-        sysOps.throw_exception('ERROR: spat_dims = ' + str(spat_dims))
+        tmp_meshgrid = np.meshgrid(np.arange(-Q,Q+1,dtype=np.double),np.arange(-Q,Q+1,dtype=np.double),np.arange(-Q,Q+1,dtype=np.double))
+        q_grid = np.fft.ifftshift([tmp_meshgrid[2], tmp_meshgrid[1], tmp_meshgrid[0]])
     
     x_umi_vec_from_ctrs = np.subtract(x_umi[:,:spat_dims],np.multiply(np.double(x_umi_grid_indices),sector_width))
     #Note that the center of the first sector remains at (0,...0)
@@ -1634,13 +1940,22 @@ def call_ffgt(x_umi,has_bcn_arr,has_trg_arr,x_umi_polynom_tuples_buff,min_x,glo_
     # "nu" index iteration
     
     # For the zeroth order addition, effectively just adding amplification factor weights to FFGT sectors
-    obj_glo_loop(q_polynom_tuples, 
-                 x_umi[:,spat_dims],x_umi[:,spat_dims+1],
-                 bcn_spat_field, trg_spat_field, 
-                 bcn_freq_field, trg_freq_field, Numi, 
-                 x_umi_polynom_tuples_buff, 
-                 x_umi_vec_from_ctrs, 
-                 x_umi_grid_indices, q_grid, glo_indices, L, max_nu, spat_dims)
+    if inp_weights is None:
+        obj_glo_loop(q_polynom_tuples, 
+                     x_umi[:,spat_dims],x_umi[:,spat_dims+1],
+                     bcn_spat_field, trg_spat_field, 
+                     bcn_freq_field, trg_freq_field, Numi, 
+                     x_umi_polynom_tuples_buff, 
+                     x_umi_vec_from_ctrs, 
+                     x_umi_grid_indices, q_grid, glo_indices, L, max_nu, spat_dims)
+    else:
+        obj_glo_loop(q_polynom_tuples, 
+                     np.multiply(x_umi[:,spat_dims],inp_weights),np.multiply(x_umi[:,spat_dims+1],inp_weights),
+                     bcn_spat_field, trg_spat_field, 
+                     bcn_freq_field, trg_freq_field, Numi, 
+                     x_umi_polynom_tuples_buff, 
+                     x_umi_vec_from_ctrs, 
+                     x_umi_grid_indices, q_grid, glo_indices, L, max_nu, spat_dims)
     
     axial_bcn_fft = np.zeros([spat_dims,int(Q)],dtype=np.complex)
     axial_trg_fft = np.zeros([spat_dims,int(Q)],dtype=np.complex)
@@ -1656,19 +1971,45 @@ def call_ffgt(x_umi,has_bcn_arr,has_trg_arr,x_umi_polynom_tuples_buff,min_x,glo_
         bcn_freq_field = np.multiply(bcn_freq_field,np.exp(-np.multiply(np.square(q_grid[0])+np.square(q_grid[1]),np.square(np.pi/L)*s)))
         trg_freq_field = np.multiply(trg_freq_field,np.exp(-np.multiply(np.square(q_grid[0])+np.square(q_grid[1]),np.square(np.pi/L)*s)))
     else:
-        sysOps.exitProgram()
+        axial_bcn_fft[0,:] = bcn_freq_field[0,0,1:int(Q+1)]
+        axial_bcn_fft[1,:] = bcn_freq_field[0,1:int(Q+1),0]
+        axial_bcn_fft[2,:] = bcn_freq_field[1:int(Q+1),0,0]
+        axial_trg_fft[0,:] = trg_freq_field[0,0,1:int(Q+1)]
+        axial_trg_fft[1,:] = trg_freq_field[0,1:int(Q+1),0]
+        axial_trg_fft[2,:] = trg_freq_field[1:int(Q+1),0,0]
+        bcn_freq_field = np.multiply(bcn_freq_field,np.exp(-np.multiply(np.square(q_grid[0])+np.square(q_grid[1])+np.square(q_grid[2]),np.square(np.pi/L)*s)))
+        trg_freq_field = np.multiply(trg_freq_field,np.exp(-np.multiply(np.square(q_grid[0])+np.square(q_grid[1])+np.square(q_grid[2]),np.square(np.pi/L)*s)))
     
-    bcn_spat_field[:] = 0.0 # now repurposed from storing trg information to storing bcn information
-    trg_spat_field[:] = 0.0 
     grad_factor_field = np.multiply(q_grid,1j*2*np.pi/L)
     
-    bcn_umi_grad = np.zeros([Numi,spat_dims + 1],dtype=np.double) #will store summed gradient information
-    trg_umi_grad = np.zeros([Numi,spat_dims + 1],dtype=np.double)
-    src_glo_loop(bcn_umi_grad, trg_umi_grad, x_umi[:,spat_dims],x_umi[:,spat_dims+1], q_polynom_tuples, grad_factor_field, 
-                 bcn_spat_field, trg_spat_field, bcn_freq_field, trg_freq_field, Numi, x_umi_polynom_tuples_buff, x_umi_vec_from_ctrs, x_umi_grid_indices, q_grid, glo_indices, L, max_nu, spat_dims,positional_grad)
+    bcn_umi_grad = np.zeros([Numi,spat_dims + 1],dtype=np.float64) #will store summed gradient information
+    trg_umi_grad = np.zeros([Numi,spat_dims + 1],dtype=np.float64)
+    
+    if positional_grad or not(positional_grad2):
+        src_glo_loop(bcn_umi_grad, trg_umi_grad, x_umi[:,spat_dims],x_umi[:,spat_dims+1], q_polynom_tuples, grad_factor_field, 
+                     bcn_freq_field, trg_freq_field, Numi, x_umi_polynom_tuples_buff, x_umi_vec_from_ctrs, x_umi_grid_indices, max_nu, spat_dims, spat_dims, positional_grad, False)
+        
+        bcn_umi_grad *= np.power(np.sqrt(np.pi)/sector_width,np.double(spat_dims))
+        trg_umi_grad *= np.power(np.sqrt(np.pi)/sector_width,np.double(spat_dims))
+
+    if positional_grad2:
+        grad2_dims = spat_dims + ((spat_dims*(spat_dims-1))/2)
+        bcn_umi_grad2 = np.zeros([Numi,grad2_dims],dtype=np.double) #will store summed gradient information
+        trg_umi_grad2 = np.zeros([Numi,grad2_dims],dtype=np.double)
+        grad2_factor_field = list()
+        for d1 in range(spat_dims):
+            for d2 in range(d1+1):
+                grad2_factor_field.append([np.multiply(grad_factor_field[d1],grad_factor_field[d2])])
+        grad2_factor_field = np.concatenate(grad2_factor_field,axis=0)
+        src_glo_loop(bcn_umi_grad2, trg_umi_grad2, x_umi[:,spat_dims],x_umi[:,spat_dims+1], q_polynom_tuples, grad2_factor_field, 
+                     bcn_freq_field, trg_freq_field, Numi, x_umi_polynom_tuples_buff, x_umi_vec_from_ctrs, x_umi_grid_indices, max_nu, spat_dims, grad2_dims, True, True)
+        
+        bcn_umi_grad2 *= np.power(np.sqrt(np.pi)/sector_width,np.double(spat_dims))
+        trg_umi_grad2 *= np.power(np.sqrt(np.pi)/sector_width,np.double(spat_dims))
+    else:
+        bcn_umi_grad2 = None
+        trg_umi_grad2 = None
         
     return (np.min(x_umi[has_bcn_arr,spat_dims]), np.min(x_umi[has_trg_arr,spat_dims+1]), 
             axial_bcn_fft, axial_trg_fft, 
-            np.multiply(bcn_umi_grad, np.power(np.sqrt(np.pi)/sector_width,np.double(spat_dims))), 
-            np.multiply(trg_umi_grad, np.power(np.sqrt(np.pi)/sector_width,np.double(spat_dims))))
-
+            bcn_umi_grad, trg_umi_grad, bcn_umi_grad2, trg_umi_grad2)

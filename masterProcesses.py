@@ -62,7 +62,7 @@ class masterProcess:
         # Basic settings
         read_thresh = 2
         min_uei_count = 2
-        output_dim = 2
+        output_dim = 3
         version = 1.0
         infer_dir = ''
         
@@ -97,7 +97,7 @@ class masterProcess:
             infer_dir = 'infer_ptmle//'
             [my_task,time_start] = parallelOps.get_next_open_task('tasklog.csv', 'microscopy_tasklist.csv', 'infer_ptmle')
                             
-        import ipdb; ipdb.set_trace()
+        # import ipdb; ipdb.set_trace()
         if not (my_task is None):
 
             sysOps.initiate_runpath(str(my_task[1]))
