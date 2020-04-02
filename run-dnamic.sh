@@ -1,3 +1,4 @@
+echo "Beginning simulation."
 # remove old sampledir, if it exists
 rm -rf sampledir/
 
@@ -20,3 +21,6 @@ cp $SMLE_SRC $SMLE_DST
 PTMLE_SRC=$(find . -regex ".*r[0-9]*/infer_ptmle/final_Xumi.*.csv" | tail -1)
 PTMLE_DST=../infer_ptmle_final_Xumi.csv
 cp $PTMLE_SRC $PTMLE_DST
+
+# send updated runname
+echo "This was experiment 4 w/ SOL, assoc100x, expansion 1.0, rmax 0.6, numi 0.5k+2.0k + perplexity row-norm set to False."

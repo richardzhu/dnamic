@@ -882,7 +882,11 @@ def run_mle(imagemodule_input_filename, smle = False, multiscale = False, segmen
         this_mle.eigen_decomp(imagemodule_input_filename)
         output_Xumi_filename = 'Xumi_smle_' + imagemodule_input_filename
         this_mle.print_status = False
+        this_mle.perplexity_gl_rownorm = True
+        this_mle.solve_on_both_sides = True
         this_mle.spat_dims = 3
+        sysOps.throw_status('sMLE with rownorm perplexity GL=' + str(this_mle.perplexity_gl_rownorm))
+        sysOps.throw_status('sMLE with solve on both sides=' + str(this_mle.solve_on_both_sides))
         sysOps.throw_status('sMLE with spat_dims=' + str(this_mle.spat_dims))
         spec_mle(this_mle, output_Xumi_filename)
         
@@ -977,6 +981,9 @@ class mleObj:
         self.print_status = True
         self.rel_err_bound = True # by default, err_bound will be evaluated as worst-case relative to the FFGT output value  
         self.calc_grad2 = False
+        self.uei_entropy = None
+        self.perplexity_gl_rownorm = False
+        self.solve_on_both_sides = False
         # counts and indices in inp_data, if this is included in input, take precedence over read-in numbers from inp_settings and imagemodule_input_filename
         
         if type(inp_settings) == dict:
@@ -1074,6 +1081,7 @@ class mleObj:
             self.sum_self_trg_uei = np.array(inp_mle.sum_self_trg_uei)
             self.bcn_amp_factors = np.array(inp_mle.bcn_amp_factors)
             self.trg_amp_factors = np.array(inp_mle.trg_amp_factors)
+            self.uei_entropy = np.array(inp_mle.uei_entropy)
             self.index_key = np.array(inp_mle.index_key)
             self.max_nontriv_eigenvec_to_calculate = int(inp_mle.max_nontriv_eigenvec_to_calculate)
             self.seq_evecs = csc_matrix(inp_mle.seq_evecs)
@@ -1189,6 +1197,12 @@ class mleObj:
         # all valid amplification factors set to values >=log(2)>0. invalid amplification factors set to 0
         self.bcn_amp_factors = np.zeros(self.Numi,dtype=np.float64)
         self.trg_amp_factors = np.zeros(self.Numi,dtype=np.float64)
+        self.uei_entropy = np.zeros(self.Numi,dtype=np.float64)
+        for i in range(self.Nassoc):
+            bcn_frac = float(self.uei_data[i,2])/float(self.sum_bcn_uei[self.uei_data[i,0]])
+            trg_frac = float(self.uei_data[i,2])/float(self.sum_trg_uei[self.uei_data[i,1]])
+            self.uei_entropy[self.uei_data[i,0]] -= bcn_frac*np.log(bcn_frac)
+            self.uei_entropy[self.uei_data[i,1]] -= trg_frac*np.log(trg_frac)
         self.bcn_amp_factors[valid_bcn_indices] = np.log((self.sum_bcn_uei[valid_bcn_indices]
                                                           +self.sum_self_bcn_uei[valid_bcn_indices])*float(2.0/min_valid_count))
         self.trg_amp_factors[valid_trg_indices] = np.log((self.sum_trg_uei[valid_trg_indices]
@@ -1238,7 +1252,10 @@ class mleObj:
                                          row_indices,col_indices,
                                          norm_uei_data,self.uei_data,
                                          self.Nassoc,self.Numi,np.False_)
-            
+            if self.perplexity_gl_rownorm:
+                for i in range(norm_uei_data.shape[0]): # Perplexity row-normalization of Graph Laplacian
+                    norm_uei_data[i] /= np.exp(self.uei_entropy[row_indices[i]])
+
             csc_op = csc_matrix((norm_uei_data, (row_indices, col_indices)), (self.Numi, self.Numi))
             
             # Clear extraneous memory usage before eigendecomposition
@@ -1246,38 +1263,94 @@ class mleObj:
             del col_indices
             del norm_uei_data
             
-            sysOps.throw_status('Generating ' + str(self.max_nontriv_eigenvec_to_calculate) + '+1 eigenvectors ...') 
-            if self.max_nontriv_eigenvec_to_calculate+2 >= self.Numi:
-                # require complete eigen-decomposition
-                evals_large, evecs_large = LA.eig(csc_op.toarray())
-            else:
-                evals_large, evecs_large = scipy.sparse.linalg.eigs(csc_op, k=self.max_nontriv_eigenvec_to_calculate+1, M = None, which='LR', v0=None, ncv=None, maxiter=None, tol = 0)
-            evals_large = np.real(evals_large) # set to real components
-            evecs_large = np.real(evecs_large)
-            sysOps.throw_status('Done.') 
-            
-            # Since power method may not return eigenvectors in correct order, sort
-            triv_eig_index = np.argmin(np.var(evecs_large,axis = 0))
-            top_nontriv_indices = np.where(np.arange(evecs_large.shape[1]) != triv_eig_index)[0]
-            # remove trivial (translational) eigenvector
-            evals_large = evals_large[top_nontriv_indices]
-            evecs_large = evecs_large[:,top_nontriv_indices]
-            eval_order = np.argsort(np.abs(evals_large))
-            evals_small = evals_large[eval_order[:self.max_nontriv_eigenvec_to_calculate]]
-            evecs_small = evecs_large[:,eval_order[:self.max_nontriv_eigenvec_to_calculate]]
-
-            if type(imagemodule_input_filename) == str:
-                sysOps.throw_status('Printing linear manifold with non-trivial eigenvalues.')
-                with open(sysOps.globaldatapath + 'evals_' + imagemodule_input_filename,'w') as evals_file:
-                    evals_file.write(','.join([str(v) for v in evals_small]) + '\n')
+            if not self.solve_on_both_sides:
+                sysOps.throw_status('Generating ' + str(self.max_nontriv_eigenvec_to_calculate) + '+1 eigenvectors ...') 
+                if self.max_nontriv_eigenvec_to_calculate+2 >= self.Numi:
+                    # require complete eigen-decomposition
+                    evals_large, evecs_large = LA.eig(csc_op.toarray())
+                else:
+                    evals_large, evecs_large = scipy.sparse.linalg.eigs(csc_op, k=self.max_nontriv_eigenvec_to_calculate+1, M = None, which='LR', v0=None, ncv=None, maxiter=None, tol = 0)
+                evals_large = np.real(evals_large) # set to real components
+                evecs_large = np.real(evecs_large)
+                sysOps.throw_status('Done.') 
                 
-                # write eigenvectors as rows in output file
-                np.savetxt(sysOps.globaldatapath + 'evecs_' + imagemodule_input_filename, 
-                           np.transpose(evecs_small[:,:self.max_nontriv_eigenvec_to_calculate]),fmt='%.10e',delimiter=',')
-                self.seq_evecs = np.transpose(evecs_small)
+                # Since power method may not return eigenvectors in correct order, sort
+                triv_eig_index = np.argmin(np.var(evecs_large,axis = 0))
+                top_nontriv_indices = np.where(np.arange(evecs_large.shape[1]) != triv_eig_index)[0]
+                # remove trivial (translational) eigenvector
+                evals_large = evals_large[top_nontriv_indices]
+                evecs_large = evecs_large[:,top_nontriv_indices]
+                eval_order = np.argsort(np.abs(evals_large))
+                evals_small = evals_large[eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                evecs_small = evecs_large[:,eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+
+                if type(imagemodule_input_filename) == str:
+                    sysOps.throw_status('Printing linear manifold with non-trivial eigenvalues.')
+                    with open(sysOps.globaldatapath + 'evals_' + imagemodule_input_filename,'w') as evals_file:
+                        evals_file.write(','.join([str(v) for v in evals_small]) + '\n')
+                    
+                    # write eigenvectors as rows in output file
+                    np.savetxt(sysOps.globaldatapath + 'evecs_' + imagemodule_input_filename, 
+                            np.transpose(evecs_small[:,:self.max_nontriv_eigenvec_to_calculate]),fmt='%.10e',delimiter=',')
+                    self.seq_evecs = np.transpose(evecs_small)
+                else:
+                    sysOps.throw_status('Assigning top ' + str(self.max_nontriv_eigenvec_to_calculate) + ' eigenvectors to manifold.')
+                    self.seq_evecs = np.array(np.transpose(evecs_small))
+            
             else:
-                sysOps.throw_status('Assigning top ' + str(self.max_nontriv_eigenvec_to_calculate) + ' eigenvectors to manifold.')
-                self.seq_evecs = np.array(np.transpose(evecs_small))
+                sysOps.throw_status('Generating 2x(' + str(self.max_nontriv_eigenvec_to_calculate) + '+1) eigenvectors ...') 
+                evals_LR, evecs_LR = scipy.sparse.linalg.eigs(csc_op, k=self.max_nontriv_eigenvec_to_calculate+1, M = None, which='LR', v0=None, ncv=None, maxiter=None, tol = 0)
+                evals_LR = np.real(evals_LR) # set to real components
+                evecs_LR = np.real(evecs_LR)
+                sysOps.throw_status('Done.') 
+
+                # Since power method may not return eigenvectors in correct order, sort
+                triv_eig_index = np.argmin(np.var(evecs_LR,axis = 0))
+                top_nontriv_indices = np.where(np.arange(evecs_LR.shape[1]) != triv_eig_index)[0]
+                # remove trivial (translational) eigenvector
+                evals_LR = evals_LR[top_nontriv_indices]
+                evecs_LR = evecs_LR[:,top_nontriv_indices]
+                eval_order = np.argsort(np.abs(evals_LR))
+                evals_LR = evals_LR[eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                evecs_LR = evecs_LR[:,eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                evals_LM, evecs_LM = scipy.sparse.linalg.eigs(csc_op, k=self.max_nontriv_eigenvec_to_calculate+1, M = None, which='LM', v0=None, ncv=None, maxiter=None, tol = 0)
+                evals_LM = np.real(evals_LM)
+                evecs_LM = np.real(evecs_LM)
+
+                # Since power method may not return eigenvectors in correct order, sort
+                triv_eig_index = np.argmax(np.abs(evals_LM))
+                top_nontriv_indices = np.where(np.arange(evecs_LM.shape[1]) != triv_eig_index)[0]
+                # remove trivial (translational) eigenvector
+                evals_LM = evals_LM[top_nontriv_indices]
+                evecs_LM = evecs_LM[:,top_nontriv_indices]
+                eval_order = np.argsort(-np.abs(evals_LM))
+                evals_LM = evals_LM[eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                evecs_LM = evecs_LM[:,eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                self.seq_evecs = list()
+                self.seq_evals = list()
+                self.seq_evecs.append([evecs_LR[:,0]])
+                self.seq_evals.append(evals_LR[0])
+                self.seq_evecs.append([evecs_LR[:,1]])
+                self.seq_evals.append(evals_LR[1])
+                if self.spat_dims == 3:
+                    self.seq_evecs.append([evecs_LR[:,2]])
+                    self.seq_evals.append(evals_LR[2])
+                self.seq_evecs.append([evecs_LM[:,0]])
+                self.seq_evals.append(evals_LM[0])
+                self.seq_evecs.append([evecs_LM[:,1]])
+                self.seq_evals.append(evals_LM[1])
+                if self.spat_dims == 3:
+                    self.seq_evecs.append([evecs_LM[:,2]])
+                    self.seq_evals.append(evals_LM[2])
+                for i in range(self.spat_dims,self.max_nontriv_eigenvec_to_calculate):
+                    self.seq_evecs.append([evecs_LR[:,i]])
+                    self.seq_evals.append(evals_LR[i])
+                    self.seq_evecs.append([evecs_LM[:,i]])
+                    self.seq_evals.append(evals_LM[i])
+                self.seq_evecs = np.concatenate(self.seq_evecs,axis = 0)
+                self.seq_evals = np.array(self.seq_evals)
+                self.max_nontriv_eigenvec_to_calculate *= 2
+
         else:
             sysOps.throw_status('Eigen-decomposition files found pre-computed.')
             self.load_manifold(imagemodule_input_filename)
@@ -1412,6 +1485,13 @@ class mleObj:
         # all valid amplification factors set to values >=log(2)>0. invalid amplification factors set to 0
         self.bcn_amp_factors = np.zeros(self.Numi,dtype=np.float64)
         self.trg_amp_factors = np.zeros(self.Numi,dtype=np.float64)
+        self.uei_entropy = np.zeros(self.Numi,dtype=np.float64)
+        for i in range(self.Nassoc):
+            bcn_frac = float(self.uei_data[i,2])/float(self.sum_bcn_uei[self.uei_data[i,0]])
+            trg_frac = float(self.uei_data[i,2])/float(self.sum_trg_uei[self.uei_data[i,1]])
+            self.uei_entropy[self.uei_data[i,0]] -= bcn_frac*np.log(bcn_frac)
+            self.uei_entropy[self.uei_data[i,1]] -= trg_frac*np.log(trg_frac)
+
         self.bcn_amp_factors[valid_bcn_indices] = np.log((self.sum_bcn_uei[valid_bcn_indices]
                                                           +self.sum_self_bcn_uei[valid_bcn_indices])*float(2.0/min_valid_count))
         self.trg_amp_factors[valid_trg_indices] = np.log((self.sum_trg_uei[valid_trg_indices]
