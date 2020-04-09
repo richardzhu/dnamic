@@ -23,4 +23,4 @@ PTMLE_DST=../infer_ptmle_final_Xumi.csv
 cp $PTMLE_SRC $PTMLE_DST
 
 # send updated runname
-echo "This was experiment 4 w/ SOL, assoc100x, expansion 1.0, rmax 0.6, numi 0.5k+2.0k + perplexity row-norm set to False."
+echo "This was experiment 7 w/ 3x Borromean rings, assoc100x, expansion 1.0, numi 0.5k+2.0k + perplexity row-norm set to False + solve on both sides set to False."

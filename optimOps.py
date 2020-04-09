@@ -882,8 +882,8 @@ def run_mle(imagemodule_input_filename, smle = False, multiscale = False, segmen
         this_mle.eigen_decomp(imagemodule_input_filename)
         output_Xumi_filename = 'Xumi_smle_' + imagemodule_input_filename
         this_mle.print_status = False
-        this_mle.perplexity_gl_rownorm = True
-        this_mle.solve_on_both_sides = True
+        this_mle.perplexity_gl_rownorm = False
+        this_mle.solve_on_both_sides = False
         this_mle.spat_dims = 3
         sysOps.throw_status('sMLE with rownorm perplexity GL=' + str(this_mle.perplexity_gl_rownorm))
         sysOps.throw_status('sMLE with solve on both sides=' + str(this_mle.solve_on_both_sides))
