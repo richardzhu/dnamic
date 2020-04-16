@@ -35,8 +35,9 @@ class ffgtDotObj: # class object for MULTIPLYING THE GAUSSIAN KERNAL MATRIX BY A
         self.mle.sum_trg_assoc = None
         self.mle.bcn_amp_factors = None
         self.mle.trg_amp_factors = None
+        self.mle.sum_self_bcn_uei = None
+        self.mle.sum_self_trg_uei = None
         self.mle.print_status = False
-        self.perplexity_gl_rownorm = False
         self.mle.rel_err_bound = True # by default, err_bound will be evaluated as worst-case relative to the FFGT output value  
         self.mle.calc_grad2 = False
         self.Numi = Xumi.shape[0]
@@ -155,7 +156,7 @@ def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
 
     sysOps.throw_status('Completed exact computation. Continuing to test FFGT.')
     
-    imagemodule_input_filename = 'test_ffgt.csv'    
+    imagemodule_input_filename = 'test_ffgt.csv'
     with open(sysOps.globaldatapath + 'seq_params_' + imagemodule_input_filename,'w') as params_file:
             params_file.write('-Nbcn ' + str(int(Nbcn)) + '\n')         #total number of (analyzeable) bcn UMI's
             params_file.write('-Ntrg ' + str(int(Ntrg)) + '\n')         #total number of (analyzeable) trg UMI's
@@ -170,7 +171,7 @@ def test_ffgt(randw = 10, s = 1.0, spat_dims = 2, Nbcn = 1000, Ntrg = 1000):
     umi_incl_ffgt = np.ones(this_mle.Numi,dtype=np.bool) #assign no outliers
     
     # call function to assign parameters on the basis of
-    L, Q, min_x = this_mle.get_ffgt_args(Xumi[umi_incl_ffgt,:])  
+    L, Q, min_x = this_mle.get_ffgt_args(Xumi[umi_incl_ffgt,:],0)  
     
     # Initial set up before call_ffgt(): ensure that all UMIs are accounted for in summation
     has_bcn_arr = np.zeros(this_mle.Numi,dtype=np.bool_)
@@ -411,30 +412,24 @@ def pt_mle(sub_mle,output_Xumi_filename):
                fmt='%.10e',delimiter=',')
     return
 
-def spec_mle(sub_mle, output_Xumi_filename = None, X = None, orig_index_key = None):
+def spec_mle(sub_mle, output_Xumi_filename = None):
     # perform structured "spectral MLE" (sMLE) likelihood maximization
+
+    for i in range(sub_mle.seq_evecs.shape[0]): # normalize (just in case)
+        sub_mle.seq_evecs[i,:] /= LA.norm(sub_mle.seq_evecs[i,:])
+
+    sub_mle.spat_dims = 3
         
     submle_eignum = int(sub_mle.max_nontriv_eigenvec_to_calculate)
     all_seq_evecs = np.array(sub_mle.seq_evecs)
-    
-    if not(X is None):
-        init_eig_count = submle_eignum
-    else:
-        X = None
-        init_eig_count = sub_mle.spat_dims
-    
-    if orig_index_key is None:
-        my_index_key = sub_mle.index_key
-    else:
-        my_index_key = orig_index_key[sub_mle.index_key]
-    
-    for eig_count in range(init_eig_count,submle_eignum+1):
+    X = None
+    for eig_count in range(sub_mle.spat_dims,submle_eignum+1):
         # SOLVE SUB-MLE
         sysOps.throw_status('Optimizing eigencomponent ' + str(eig_count) + '/' + str(submle_eignum))
-        if eig_count == init_eig_count and (X is None):
-            X = np.sqrt(float(sub_mle.Numi))*np.eye(sub_mle.spat_dims,dtype=np.float64) 
+        if eig_count == sub_mle.spat_dims:
+            X = np.eye(sub_mle.spat_dims,dtype=np.float64) 
             # initialize as identity matrix
-        elif eig_count != init_eig_count:
+        else:
             X = np.concatenate([X,np.zeros([1,sub_mle.spat_dims],dtype=np.float64)],axis = 0) 
             # add new eigenvector coefficients as degrees of freedom initialized to 0
             
@@ -454,17 +449,17 @@ def spec_mle(sub_mle, output_Xumi_filename = None, X = None, orig_index_key = No
             my_Xumi = sub_mle.seq_evecs.transpose().dot(X)
             if not (output_Xumi_filename is None):
                 np.savetxt(sysOps.globaldatapath +output_Xumi_filename,
-                           np.concatenate([my_index_key.reshape([sub_mle.Numi,1]), my_Xumi],axis = 1),fmt='%i,' + ','.join(['%.10e' for i in range(my_Xumi.shape[1])]),delimiter=',')
-
-            
-            break
-        
+                           np.concatenate([sub_mle.index_key.reshape([sub_mle.Numi,1]), my_Xumi],axis = 1),fmt='%i,' + ','.join(['%.10e' for i in range(my_Xumi.shape[1])]),delimiter=',')
+                
+                return my_Xumi
+            else:
+                break
+        '''
         elif eig_count%5 == 0: # can include to get regular updates on the solution at regular intervals
             my_Xumi = sub_mle.seq_evecs.transpose().dot(X)
             np.savetxt(sysOps.globaldatapath + 'iter' + str(eig_count) + '_' + output_Xumi_filename,
-                       np.concatenate([my_index_key.reshape([sub_mle.Numi,1]), my_Xumi],axis = 1),fmt='%i,' + ','.join(['%.10e' for i in range(my_Xumi.shape[1])]),delimiter=',')
-    
-    return my_Xumi
+                       np.concatenate([sub_mle.index_key.reshape([sub_mle.Numi,1]), my_Xumi],axis = 1),fmt='%i,' + ','.join(['%.10e' for i in range(my_Xumi.shape[1])]),delimiter=',')
+        '''
             
 # NUMBA declaration
 @jit("void(int64[:,:],int64[:],int64[:,:],int64[:],int64[:],int64[:],bool_[:],bool_[:],int64)",nopython=True)
@@ -825,7 +820,7 @@ def segmentation_analysis(imagemodule_input_filename, this_mle, stopping_conduct
                                segmentation_assignments.reshape([this_mle.Numi,1]),
                                segment_coords],axis = 1),fmt='%i,%i,%.10e,%.10e,%.10e',delimiter=',')
     
-def run_mle(imagemodule_input_filename, smle = False, msmle = False, segment = False, compute_local_solutions_only = False):
+def run_mle(imagemodule_input_filename, smle = False, multiscale = False, segment = False, compute_local_solutions_only = False):
     # Primary function call for image inference and segmentation
     # Inputs:
     #     imagemodule_input_filename: UEI data input file
@@ -876,111 +871,31 @@ def run_mle(imagemodule_input_filename, smle = False, msmle = False, segment = F
                 break
             
         sysOps.throw_status('All segmentations found computed.')
-    elif smle and not msmle:
+    elif smle and not multiscale:
         
         # run test for 3D FFGT
         # sysOps.throw_status('Testing 3DM ...')
         # test_ffgt(randw = 10, s = 1.0, spat_dims = 3, Nbcn = 1000, Ntrg = 1000)
         
         sysOps.throw_status('Running sMLE. Initiating ...')
-        this_mle.max_nontriv_eigenvec_to_calculate = 10
+        this_mle.max_nontriv_eigenvec_to_calculate = 100
         this_mle.eigen_decomp(imagemodule_input_filename)
         output_Xumi_filename = 'Xumi_smle_' + imagemodule_input_filename
         this_mle.print_status = False
+        this_mle.perplexity_gl_rownorm = False
+        this_mle.solve_on_both_sides = False
+        this_mle.spat_dims = 3
+        sysOps.throw_status('sMLE with rownorm perplexity GL=' + str(this_mle.perplexity_gl_rownorm))
+        sysOps.throw_status('sMLE with solve on both sides=' + str(this_mle.solve_on_both_sides))
+        sysOps.throw_status('sMLE with spat_dims=' + str(this_mle.spat_dims))
         spec_mle(this_mle, output_Xumi_filename)
-        
-    elif msmle:
-        this_mle.max_nontriv_eigenvec_to_calculate = 100
-        tot_quantiles = 10
-        
-        sorted_indices = -np.ones(this_mle.Numi,dtype=np.int64)
-        bcn_indices = np.where(this_mle.sum_bcn_uei>0)[0]
-        trg_indices = np.where(this_mle.sum_trg_uei>0)[0]
-        bcn_sorted_indices = bcn_indices[np.argsort(-this_mle.uei_entropy[bcn_indices])] # indices that are beacons, sorted by decreasing UEI entropy
-        trg_sorted_indices = trg_indices[np.argsort(-this_mle.uei_entropy[trg_indices])] # indices that are targets, sorted by decreasing UEI entropy
-        if this_mle.Nbcn < this_mle.Ntrg:
-            sorted_indices[np.arange(0,2*this_mle.Nbcn,2)] = bcn_sorted_indices
-            sorted_indices[np.arange(1,2*this_mle.Nbcn,2)] = trg_sorted_indices[:this_mle.Nbcn]
-            sorted_indices[(2*this_mle.Nbcn):] = trg_sorted_indices[this_mle.Nbcn:]
-        else:
-            sorted_indices[np.arange(0,2*this_mle.Ntrg,2)] = bcn_sorted_indices[:this_mle.Ntrg]
-            sorted_indices[np.arange(1,2*this_mle.Ntrg,2)] = trg_sorted_indices
-            sorted_indices[(2*this_mle.Ntrg):] = bcn_sorted_indices[this_mle.Ntrg:]
-            
-        quantile_indices = np.int64(np.ceil(np.logspace(3.0,np.log10(float(this_mle.Numi)),tot_quantiles)))        
-        
-        prev_X = None
-        prev_indices = None
-        
-        for i in range(tot_quantiles):
-            my_boolean = np.zeros(this_mle.Numi,dtype=np.bool_)
-            my_boolean[sorted_indices[:quantile_indices[i]]] = np.True_
-            sysOps.throw_status('Performing sMLE on UEI-entropy quantile ' + str(i+1) + '/' + str(tot_quantiles) + ' with ' + str(np.sum(my_boolean)) + ' UMIs included.')
-            assoc_inclusion_arr = np.multiply(my_boolean[this_mle.uei_data[:,0]],my_boolean[this_mle.uei_data[:,1]])
-            
-            my_sum_bcn_uei = np.zeros(this_mle.Numi,dtype=np.int64)
-            my_sum_trg_uei = np.zeros(this_mle.Numi,dtype=np.int64)
-            for j in np.where(assoc_inclusion_arr)[0]:
-                my_sum_bcn_uei[this_mle.uei_data[j,0]] += this_mle.uei_data[j,2]
-                my_sum_trg_uei[this_mle.uei_data[j,1]] += this_mle.uei_data[j,2]
-                
-            while True:
-                remove_assoc = np.multiply(assoc_inclusion_arr,
-                                           np.add(my_sum_bcn_uei[this_mle.uei_data[:,0]]<minuei,
-                                                  my_sum_trg_uei[this_mle.uei_data[:,1]]<minuei))
-                if np.sum(remove_assoc) == 0:
-                    break
-        
-                for j in np.where(remove_assoc)[0]:
-                    my_sum_bcn_uei[this_mle.uei_data[j,0]] -= this_mle.uei_data[j,2]
-                    my_sum_trg_uei[this_mle.uei_data[j,1]] -= this_mle.uei_data[j,2]
-                
-                assoc_inclusion_arr = np.multiply(assoc_inclusion_arr,~remove_assoc)
-            
-            sysOps.throw_status('Creating mleObj with ' + str(np.sum(assoc_inclusion_arr)) + '/' + str(assoc_inclusion_arr.shape[0]) + ' associations included.')
-            this_mle.print_status = True
-            
-            sub_mle = mleObj(None,None,this_mle)
-            sub_mle.index_key = np.arange(this_mle.Numi,dtype=np.int64) # note: this is being done this way to ensure we can trace back to original this_mle indices
-            sub_mle.reduce_to_largest_linkage_cluster(assoc_inclusion_arr)
-            
-            if sub_mle.Numi > this_mle.max_nontriv_eigenvec_to_calculate:
-                sysOps.throw_status('Sufficient contiguous UMI (Nbcn = ' + str(sub_mle.Nbcn) + ', Ntrg = ' + str(sub_mle.Ntrg) + '), numbering ' + str(sub_mle.Numi))
-                sub_mle.max_nontriv_eigenvec_to_calculate = int(this_mle.max_nontriv_eigenvec_to_calculate)
-                sub_mle.eigen_decomp(None)
-                sub_mle.print_status = False
-                
-                if i == tot_quantiles - 1:
-                    output_Xumi_filename = 'Xumi_smle_' + imagemodule_input_filename
-                else:
-                    output_Xumi_filename = 'q' + str(i) + '_Xumi_smle_' + imagemodule_input_filename
-                    
-                if prev_X is None:
-                    sysOps.throw_status('Performing sMLE "from scratch"')
-                    prev_X = spec_mle(sub_mle,output_Xumi_filename,None,this_mle.index_key)
-                    prev_X = sub_mle.backproj_mat.T.dot(prev_X)
-                else:
-                    sysOps.throw_status('Initializing sMLE from previous quantile solution.')
-                    my_evecs = np.zeros([sub_mle.seq_evecs.shape[0],this_mle.Numi],dtype=np.float64)
-                    my_evecs[:,sub_mle.index_key] = sub_mle.seq_evecs
-                    
-                    # project previous solution in previous eigenvector basis set onto new eigenvectors
-                    new_X = LA.inv(my_evecs.dot(my_evecs.T)).dot(my_evecs.dot(prev_evecs.T.dot(prev_X)))
-                    
-                    prev_X = spec_mle(sub_mle,output_Xumi_filename,new_X,this_mle.index_key)
-                    prev_X = sub_mle.backproj_mat.T.dot(prev_X)
-                
-                prev_evecs = np.zeros([sub_mle.seq_evecs.shape[0],this_mle.Numi],dtype=np.float64)
-                prev_evecs[:,sub_mle.index_key] = sub_mle.seq_evecs
-            else:
-                sysOps.throw_status('Insufficient contiguous UMI, numbering ' + str(sub_mle.Numi))
-                
-            del sub_mle
         
     elif not sysOps.check_file_exists('Xumi_pt_' + imagemodule_input_filename):
         sysOps.throw_status('Running ptMLE. Initiating eigenvectors ...')
         this_mle.max_nontriv_eigenvec_to_calculate = 100
         this_mle.eigen_decomp(imagemodule_input_filename)
+        this_mle.spat_dims = 3
+        sysOps.throw_status('ptMLE with spat_dims=' + str(this_mle.spat_dims))
         sysOps.throw_status('Continuing optimization ...')
         pt_mle(this_mle,'Xumi_pt_' + imagemodule_input_filename)
     else:
@@ -1015,12 +930,18 @@ def generate_new_subdata(uei_data, this_mle):
     
     this_mle.sum_bcn_uei = np.zeros(this_mle.Numi,dtype=np.int64)
     this_mle.sum_trg_uei = np.zeros(this_mle.Numi,dtype=np.int64)
+    this_mle.sum_self_bcn_uei = np.zeros(this_mle.Numi,dtype=np.int64)
+    this_mle.sum_self_trg_uei = np.zeros(this_mle.Numi,dtype=np.int64)
     this_mle.sum_bcn_assoc = np.zeros(this_mle.Numi,dtype=np.int64)
     this_mle.sum_trg_assoc = np.zeros(this_mle.Numi,dtype=np.int64)
 
     for i in range(uei_data.shape[0]):
-        this_mle.sum_bcn_uei[this_mle.uei_data[i,0]] += this_mle.uei_data[i,2]
-        this_mle.sum_trg_uei[this_mle.uei_data[i,1]] += this_mle.uei_data[i,2]
+        if this_mle.uei_data[i,0] == this_mle.uei_data[i,1]:
+            this_mle.sum_self_bcn_uei[this_mle.uei_data[i,0]] += this_mle.uei_data[i,2]
+            this_mle.sum_self_trg_uei[this_mle.uei_data[i,1]] += this_mle.uei_data[i,2]
+        else:
+            this_mle.sum_bcn_uei[this_mle.uei_data[i,0]] += this_mle.uei_data[i,2]
+            this_mle.sum_trg_uei[this_mle.uei_data[i,1]] += this_mle.uei_data[i,2]
         this_mle.sum_bcn_assoc[this_mle.uei_data[i,0]] += 1
         this_mle.sum_trg_assoc[this_mle.uei_data[i,1]] += 1
 
@@ -1054,13 +975,15 @@ class mleObj:
         self.sum_trg_assoc = None
         self.bcn_amp_factors = None
         self.trg_amp_factors = None
+        self.sum_self_bcn_uei = None
+        self.sum_self_trg_uei = None
         self.Numi = None
         self.print_status = True
-        self.perplexity_gl_rownorm = False
         self.rel_err_bound = True # by default, err_bound will be evaluated as worst-case relative to the FFGT output value  
         self.calc_grad2 = False
         self.uei_entropy = None
-        
+        self.perplexity_gl_rownorm = False
+        self.solve_on_both_sides = False
         # counts and indices in inp_data, if this is included in input, take precedence over read-in numbers from inp_settings and imagemodule_input_filename
         
         if type(inp_settings) == dict:
@@ -1154,13 +1077,15 @@ class mleObj:
             self.sum_trg_assoc = np.array(inp_mle.sum_trg_assoc)
             self.sum_bcn_uei = np.array(inp_mle.sum_bcn_uei)
             self.sum_trg_uei = np.array(inp_mle.sum_trg_uei)
+            self.sum_self_bcn_uei = np.array(inp_mle.sum_self_bcn_uei)
+            self.sum_self_trg_uei = np.array(inp_mle.sum_self_trg_uei)
             self.bcn_amp_factors = np.array(inp_mle.bcn_amp_factors)
             self.trg_amp_factors = np.array(inp_mle.trg_amp_factors)
             self.uei_entropy = np.array(inp_mle.uei_entropy)
             self.index_key = np.array(inp_mle.index_key)
             self.max_nontriv_eigenvec_to_calculate = int(inp_mle.max_nontriv_eigenvec_to_calculate)
-            self.seq_evecs = np.array(inp_mle.seq_evecs)
-            self.backproj_mat = np.array(inp_mle.backproj_mat) # inverse of the inner product between seq_evecs and itself
+            self.seq_evecs = csc_matrix(inp_mle.seq_evecs)
+            self.backproj_mat = csc_matrix(inp_mle.backproj_mat) # inverse of the inner product between seq_evecs and itself
             self.max_nu = int(inp_mle.max_nu)
             self.glo_indices = np.array(inp_mle.glo_indices)
             self.x_umi_polynom_tuples_buff =  np.array(inp_mle.x_umi_polynom_tuples_buff)
@@ -1183,6 +1108,7 @@ class mleObj:
             if self.print_status:
                 sysOps.throw_status('Using maximum polynomial order ' + str(self.max_nu) + ' to achieve (1+eps_nu)^2 < 1 + ' +str(self.err_bound) + '. Assembling GLO indices.')
             self.glo_indices = get_glo_indices(self.max_nu,self.spat_dims)
+            sysOps.throw_status('glo_indices shape: ' + str(self.glo_indices.shape))
             
             # allocate memory for FFGT calls
             self.x_umi_polynom_tuples_buff = np.zeros([self.Numi,len(self.glo_indices)],dtype=np.double)
@@ -1210,7 +1136,8 @@ class mleObj:
         if not(infilename is None) and type(inp_data) != np.ndarray:
             sysOps.throw_status('Loading data from ' + sysOps.globaldatapath + infilename)
             if not sysOps.check_file_exists(infilename):
-                sysOps.throw_status(sysOps.globaldatapath + infilename + ' does not exist. Returning.')
+                sysOps.throw_status(sysOps.globaldatapath + infilename + ' does not exist. Exiting.')
+                sysOps.exitProgram()
                 return
             self.uei_data = np.loadtxt(sysOps.globaldatapath + infilename,dtype=np.int64,delimiter=',')
             # Loaded data will contain indices starting at 0 for both beacons and targets.
@@ -1241,6 +1168,10 @@ class mleObj:
             self.sum_bcn_assoc = np.zeros(self.Numi,dtype=np.int64)
             self.sum_trg_assoc = np.zeros(self.Numi,dtype=np.int64)
             
+            if type(self.sum_self_bcn_uei) != np.ndarray or type(self.sum_self_trg_uei) != np.ndarray:
+                self.sum_self_bcn_uei = np.zeros(self.Numi,dtype=np.int64)
+                self.sum_self_trg_uei = np.zeros(self.Numi,dtype=np.int64)
+            
             for i in range(self.Nassoc):
                 self.sum_bcn_uei[self.uei_data[i,0]] += self.uei_data[i,2]
                 self.sum_trg_uei[self.uei_data[i,1]] += self.uei_data[i,2]
@@ -1257,10 +1188,11 @@ class mleObj:
             sysOps.exitProgram()
             
         # initiate amplification factors
-        valid_bcn_indices = (self.sum_bcn_uei > 0)
-        valid_trg_indices = (self.sum_trg_uei > 0)
+        valid_bcn_indices = ((self.sum_bcn_uei+self.sum_self_bcn_uei) > 0)
+        valid_trg_indices = ((self.sum_trg_uei+self.sum_self_trg_uei) > 0)
         
-        min_valid_count = min(np.min(self.sum_bcn_uei[valid_bcn_indices]),np.min(self.sum_trg_uei[valid_trg_indices]))
+        min_valid_count = min(np.min(self.sum_bcn_uei[valid_bcn_indices] + self.sum_self_bcn_uei[valid_bcn_indices]),
+                              np.min(self.sum_trg_uei[valid_trg_indices] + self.sum_self_trg_uei[valid_trg_indices]))
         
         # all valid amplification factors set to values >=log(2)>0. invalid amplification factors set to 0
         self.bcn_amp_factors = np.zeros(self.Numi,dtype=np.float64)
@@ -1271,8 +1203,10 @@ class mleObj:
             trg_frac = float(self.uei_data[i,2])/float(self.sum_trg_uei[self.uei_data[i,1]])
             self.uei_entropy[self.uei_data[i,0]] -= bcn_frac*np.log(bcn_frac)
             self.uei_entropy[self.uei_data[i,1]] -= trg_frac*np.log(trg_frac)
-        self.bcn_amp_factors[valid_bcn_indices] = np.log((self.sum_bcn_uei[valid_bcn_indices])*float(2.0/min_valid_count))
-        self.trg_amp_factors[valid_trg_indices] = np.log((self.sum_trg_uei[valid_trg_indices])*float(2.0/min_valid_count))
+        self.bcn_amp_factors[valid_bcn_indices] = np.log((self.sum_bcn_uei[valid_bcn_indices]
+                                                          +self.sum_self_bcn_uei[valid_bcn_indices])*float(2.0/min_valid_count))
+        self.trg_amp_factors[valid_trg_indices] = np.log((self.sum_trg_uei[valid_trg_indices]
+                                                          +self.sum_self_trg_uei[valid_trg_indices])*float(2.0/min_valid_count))
         if self.print_status:
             sysOps.throw_status('Data read-in complete. Found ' + str(np.sum(~valid_bcn_indices)) + ' empty beacon indices and ' + str(np.sum(~valid_trg_indices)) + ' empty target indices.')
         return
@@ -1318,11 +1252,10 @@ class mleObj:
                                          row_indices,col_indices,
                                          norm_uei_data,self.uei_data,
                                          self.Nassoc,self.Numi,np.False_)
-            
             if self.perplexity_gl_rownorm:
-                for i in range(norm_uei_data.shape[0]):
+                for i in range(norm_uei_data.shape[0]): # Perplexity row-normalization of Graph Laplacian
                     norm_uei_data[i] /= np.exp(self.uei_entropy[row_indices[i]])
-            
+
             csc_op = csc_matrix((norm_uei_data, (row_indices, col_indices)), (self.Numi, self.Numi))
             
             # Clear extraneous memory usage before eigendecomposition
@@ -1330,38 +1263,94 @@ class mleObj:
             del col_indices
             del norm_uei_data
             
-            sysOps.throw_status('Generating ' + str(self.max_nontriv_eigenvec_to_calculate) + '+1 eigenvectors ...') 
-            if self.max_nontriv_eigenvec_to_calculate+2 >= self.Numi:
-                # require complete eigen-decomposition
-                evals_large, evecs_large = LA.eig(csc_op.toarray())
-            else:
-                evals_large, evecs_large = scipy.sparse.linalg.eigs(csc_op, k=self.max_nontriv_eigenvec_to_calculate+1, M = None, which='LR', v0=None, ncv=None, maxiter=None, tol = 0)
-            evals_large = np.real(evals_large) # set to real components
-            evecs_large = np.real(evecs_large)
-            sysOps.throw_status('Done.') 
-            
-            # Since power method may not return eigenvectors in correct order, sort
-            triv_eig_index = np.argmin(np.var(evecs_large,axis = 0))
-            top_nontriv_indices = np.where(np.arange(evecs_large.shape[1]) != triv_eig_index)[0]
-            # remove trivial (translational) eigenvector
-            evals_large = evals_large[top_nontriv_indices]
-            evecs_large = evecs_large[:,top_nontriv_indices]
-            eval_order = np.argsort(np.abs(evals_large))
-            evals_small = evals_large[eval_order[:self.max_nontriv_eigenvec_to_calculate]]
-            evecs_small = evecs_large[:,eval_order[:self.max_nontriv_eigenvec_to_calculate]]
-
-            if type(imagemodule_input_filename) == str:
-                sysOps.throw_status('Printing linear manifold with non-trivial eigenvalues.')
-                with open(sysOps.globaldatapath + 'evals_' + imagemodule_input_filename,'w') as evals_file:
-                    evals_file.write(','.join([str(v) for v in evals_small]) + '\n')
+            if not self.solve_on_both_sides:
+                sysOps.throw_status('Generating ' + str(self.max_nontriv_eigenvec_to_calculate) + '+1 eigenvectors ...') 
+                if self.max_nontriv_eigenvec_to_calculate+2 >= self.Numi:
+                    # require complete eigen-decomposition
+                    evals_large, evecs_large = LA.eig(csc_op.toarray())
+                else:
+                    evals_large, evecs_large = scipy.sparse.linalg.eigs(csc_op, k=self.max_nontriv_eigenvec_to_calculate+1, M = None, which='LR', v0=None, ncv=None, maxiter=None, tol = 0)
+                evals_large = np.real(evals_large) # set to real components
+                evecs_large = np.real(evecs_large)
+                sysOps.throw_status('Done.') 
                 
-                # write eigenvectors as rows in output file
-                np.savetxt(sysOps.globaldatapath + 'evecs_' + imagemodule_input_filename, 
-                           np.transpose(evecs_small[:,:self.max_nontriv_eigenvec_to_calculate]),fmt='%.10e',delimiter=',')
-                self.seq_evecs = np.transpose(evecs_small)
+                # Since power method may not return eigenvectors in correct order, sort
+                triv_eig_index = np.argmin(np.var(evecs_large,axis = 0))
+                top_nontriv_indices = np.where(np.arange(evecs_large.shape[1]) != triv_eig_index)[0]
+                # remove trivial (translational) eigenvector
+                evals_large = evals_large[top_nontriv_indices]
+                evecs_large = evecs_large[:,top_nontriv_indices]
+                eval_order = np.argsort(np.abs(evals_large))
+                evals_small = evals_large[eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                evecs_small = evecs_large[:,eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+
+                if type(imagemodule_input_filename) == str:
+                    sysOps.throw_status('Printing linear manifold with non-trivial eigenvalues.')
+                    with open(sysOps.globaldatapath + 'evals_' + imagemodule_input_filename,'w') as evals_file:
+                        evals_file.write(','.join([str(v) for v in evals_small]) + '\n')
+                    
+                    # write eigenvectors as rows in output file
+                    np.savetxt(sysOps.globaldatapath + 'evecs_' + imagemodule_input_filename, 
+                            np.transpose(evecs_small[:,:self.max_nontriv_eigenvec_to_calculate]),fmt='%.10e',delimiter=',')
+                    self.seq_evecs = np.transpose(evecs_small)
+                else:
+                    sysOps.throw_status('Assigning top ' + str(self.max_nontriv_eigenvec_to_calculate) + ' eigenvectors to manifold.')
+                    self.seq_evecs = np.array(np.transpose(evecs_small))
+            
             else:
-                sysOps.throw_status('Assigning top ' + str(self.max_nontriv_eigenvec_to_calculate) + ' eigenvectors to manifold.')
-                self.seq_evecs = np.array(np.transpose(evecs_small))
+                sysOps.throw_status('Generating 2x(' + str(self.max_nontriv_eigenvec_to_calculate) + '+1) eigenvectors ...') 
+                evals_LR, evecs_LR = scipy.sparse.linalg.eigs(csc_op, k=self.max_nontriv_eigenvec_to_calculate+1, M = None, which='LR', v0=None, ncv=None, maxiter=None, tol = 0)
+                evals_LR = np.real(evals_LR) # set to real components
+                evecs_LR = np.real(evecs_LR)
+                sysOps.throw_status('Done.') 
+
+                # Since power method may not return eigenvectors in correct order, sort
+                triv_eig_index = np.argmin(np.var(evecs_LR,axis = 0))
+                top_nontriv_indices = np.where(np.arange(evecs_LR.shape[1]) != triv_eig_index)[0]
+                # remove trivial (translational) eigenvector
+                evals_LR = evals_LR[top_nontriv_indices]
+                evecs_LR = evecs_LR[:,top_nontriv_indices]
+                eval_order = np.argsort(np.abs(evals_LR))
+                evals_LR = evals_LR[eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                evecs_LR = evecs_LR[:,eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                evals_LM, evecs_LM = scipy.sparse.linalg.eigs(csc_op, k=self.max_nontriv_eigenvec_to_calculate+1, M = None, which='LM', v0=None, ncv=None, maxiter=None, tol = 0)
+                evals_LM = np.real(evals_LM)
+                evecs_LM = np.real(evecs_LM)
+
+                # Since power method may not return eigenvectors in correct order, sort
+                triv_eig_index = np.argmax(np.abs(evals_LM))
+                top_nontriv_indices = np.where(np.arange(evecs_LM.shape[1]) != triv_eig_index)[0]
+                # remove trivial (translational) eigenvector
+                evals_LM = evals_LM[top_nontriv_indices]
+                evecs_LM = evecs_LM[:,top_nontriv_indices]
+                eval_order = np.argsort(-np.abs(evals_LM))
+                evals_LM = evals_LM[eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                evecs_LM = evecs_LM[:,eval_order[:self.max_nontriv_eigenvec_to_calculate]]
+                self.seq_evecs = list()
+                self.seq_evals = list()
+                self.seq_evecs.append([evecs_LR[:,0]])
+                self.seq_evals.append(evals_LR[0])
+                self.seq_evecs.append([evecs_LR[:,1]])
+                self.seq_evals.append(evals_LR[1])
+                if self.spat_dims == 3:
+                    self.seq_evecs.append([evecs_LR[:,2]])
+                    self.seq_evals.append(evals_LR[2])
+                self.seq_evecs.append([evecs_LM[:,0]])
+                self.seq_evals.append(evals_LM[0])
+                self.seq_evecs.append([evecs_LM[:,1]])
+                self.seq_evals.append(evals_LM[1])
+                if self.spat_dims == 3:
+                    self.seq_evecs.append([evecs_LM[:,2]])
+                    self.seq_evals.append(evals_LM[2])
+                for i in range(self.spat_dims,self.max_nontriv_eigenvec_to_calculate):
+                    self.seq_evecs.append([evecs_LR[:,i]])
+                    self.seq_evals.append(evals_LR[i])
+                    self.seq_evecs.append([evecs_LM[:,i]])
+                    self.seq_evals.append(evals_LM[i])
+                self.seq_evecs = np.concatenate(self.seq_evecs,axis = 0)
+                self.seq_evals = np.array(self.seq_evals)
+                self.max_nontriv_eigenvec_to_calculate *= 2
+
         else:
             sysOps.throw_status('Eigen-decomposition files found pre-computed.')
             self.load_manifold(imagemodule_input_filename)
@@ -1463,6 +1452,8 @@ class mleObj:
                 sysOps.exitProgram()
         
         self.uei_data = self.uei_data[uei_retained,:]
+        self.sum_self_bcn_uei = self.sum_self_bcn_uei[umi_retained]
+        self.sum_self_trg_uei = self.sum_self_trg_uei[umi_retained]
         
         sysOps.throw_status('Retained ' + str(np.sum(self.uei_data[:,2])) + '/' + str(init_uei) + ' UEIs, ' + str(self.uei_data.shape[0]) + '/' + str(init_assoc) + ' associations.')
         
@@ -1470,7 +1461,6 @@ class mleObj:
         self.sum_trg_uei = np.zeros(self.Numi,dtype=np.int64)
         self.sum_bcn_assoc = np.zeros(self.Numi,dtype=np.int64)
         self.sum_trg_assoc = np.zeros(self.Numi,dtype=np.int64)
-        
         self.Nuei = np.sum(self.uei_data[:,2])
         self.Nassoc = int(self.uei_data.shape[0])
         
@@ -1486,11 +1476,11 @@ class mleObj:
             self.sum_trg_assoc[self.uei_data[i,1]] += 1
         
         # initiate amplification factors
-        valid_bcn_indices = ((self.sum_bcn_uei) > 0)
-        valid_trg_indices = ((self.sum_trg_uei) > 0)
+        valid_bcn_indices = ((self.sum_bcn_uei+self.sum_self_bcn_uei) > 0)
+        valid_trg_indices = ((self.sum_trg_uei+self.sum_self_trg_uei) > 0)
         
-        min_valid_count = min(np.min(self.sum_bcn_uei[valid_bcn_indices]),
-                              np.min(self.sum_trg_uei[valid_trg_indices]))
+        min_valid_count = min(np.min(self.sum_bcn_uei[valid_bcn_indices]+self.sum_self_bcn_uei[valid_bcn_indices]),
+                              np.min(self.sum_trg_uei[valid_trg_indices]+self.sum_self_trg_uei[valid_trg_indices]))
         
         # all valid amplification factors set to values >=log(2)>0. invalid amplification factors set to 0
         self.bcn_amp_factors = np.zeros(self.Numi,dtype=np.float64)
@@ -1501,9 +1491,11 @@ class mleObj:
             trg_frac = float(self.uei_data[i,2])/float(self.sum_trg_uei[self.uei_data[i,1]])
             self.uei_entropy[self.uei_data[i,0]] -= bcn_frac*np.log(bcn_frac)
             self.uei_entropy[self.uei_data[i,1]] -= trg_frac*np.log(trg_frac)
-            
-        self.bcn_amp_factors[valid_bcn_indices] = np.log((self.sum_bcn_uei[valid_bcn_indices])*float(2.0/min_valid_count))
-        self.trg_amp_factors[valid_trg_indices] = np.log((self.sum_trg_uei[valid_trg_indices])*float(2.0/min_valid_count))
+
+        self.bcn_amp_factors[valid_bcn_indices] = np.log((self.sum_bcn_uei[valid_bcn_indices]
+                                                          +self.sum_self_bcn_uei[valid_bcn_indices])*float(2.0/min_valid_count))
+        self.trg_amp_factors[valid_trg_indices] = np.log((self.sum_trg_uei[valid_trg_indices]
+                                                          +self.sum_self_trg_uei[valid_trg_indices])*float(2.0/min_valid_count))
         
         return
         
@@ -1606,13 +1598,14 @@ class mleObj:
         self.umi_incl_ffgt = np.arange(self.Numi,dtype=np.int64)[self.umi_incl_ffgt] # convert to index array
 
         default_max_Q = 100.0
-        has_bcn_arr = ((self.sum_bcn_uei[self.umi_incl_ffgt]) > 0) # crucially, has_bcn_arr and has_trg_arr are boolean arrays referring to the sub-set determined by umi_incl_ffgt
-        has_trg_arr = ((self.sum_trg_uei[self.umi_incl_ffgt]) > 0)
+        has_bcn_arr = ((self.sum_bcn_uei[self.umi_incl_ffgt]+self.sum_self_bcn_uei[self.umi_incl_ffgt]) > 0) # crucially, has_bcn_arr and has_trg_arr are boolean arrays referring to the sub-set determined by umi_incl_ffgt
+        has_trg_arr = ((self.sum_trg_uei[self.umi_incl_ffgt]+self.sum_self_trg_uei[self.umi_incl_ffgt]) > 0)
 
         while True:
             # This loop exists to ensure that values of L and Q are appropriate --> if not, will update accordingly
 
             self.L, self.Q, self.min_x = self.get_ffgt_args(self.x_umi[self.umi_incl_ffgt,:])
+            # import ipdb; ipdb.set_trace()
 
             if ffgt_internal_count == 0:
                 self.Q = np.ceil(1.1*self.Q) # being conservative with initial estimate
@@ -1685,6 +1678,7 @@ class mleObj:
         dXtrg[self.umi_incl_ffgt,:] = np.multiply(-(self.Nuei/self.sumw),Xtrg_grad_sub[:,:self.spat_dims])
         
         # add convex (UEI-data) portion of gradients
+        # (Xumi,dXbcn,dXtrg,uei_data,sumw,Nuei,Nassoc,s,spat_dims):
         log_likelihood = add_convex_components(self.x_umi,dXbcn,dXtrg,self.uei_data,
                                                self.sumw,self.Nuei,self.Nassoc,self.s,self.spat_dims)
             
