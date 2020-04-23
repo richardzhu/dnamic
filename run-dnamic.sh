@@ -10,11 +10,11 @@ cp posfile.csv sampledir/posfile.csv
 cd sampledir/
 python2 ../simOps.py  # run chemical 'dynamics' simulation
 python2 ../main.py  # simulate noisy DNA sequencing
-python2 ../main.py smle_infer  # use spectral-MLE to infer positions
+python2 ../main.py msmle_infer  # use modified spectral-MLE to infer positions
 python2 ../main.py ptmle_infer  # use point-MLE to infer positions
 
 # save the relevant position files to base directory
-SMLE_SRC=$(find . -regex ".*r[0-9]*/infer_smle/final_Xumi.*.csv" | tail -1)
+SMLE_SRC=$(find . -regex ".*r[0-9]*/infer_msmle/final_Xumi.*.csv" | tail -1)
 SMLE_DST=../infer_smle_final_Xumi.csv
 cp $SMLE_SRC $SMLE_DST
 
@@ -23,4 +23,8 @@ PTMLE_DST=../infer_ptmle_final_Xumi.csv
 cp $PTMLE_SRC $PTMLE_DST
 
 # send updated runname
-echo "This was experiment 8 w/ 3x Borromean rings, assoc100x, expansion 1.0, numi 2.0k+2.0k + perplexity row-norm set to true + solve on both sides set to true." > ./exp-info.txt
+echo "This was experiment 10 w/ 3x Borromean rings, assoc100x, expansion 1.0, numi 0.5k+2.0k + perplexity row-norm set to true + solve on both sides set to true." > ./exp-info.txt
+
+# process metrics
+# cd ..
+# python3 metrics.py
