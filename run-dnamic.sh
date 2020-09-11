@@ -23,7 +23,7 @@ PTMLE_DST=../infer_ptmle_final_Xumi.csv
 cp $PTMLE_SRC $PTMLE_DST
 
 # send updated runname
-echo "This was experiment 10 w/ 3x Borromean rings, assoc100x, expansion 1.0, numi 0.5k+2.0k + perplexity row-norm set to true + solve on both sides set to true." > ./exp-info.txt
+echo "This was experiment 11 w/ SOL assoc100x rmax 0.6, numi 0.5k+2.0k, defaults on Weinstein's optimOps with perplexity rownorm=True" > ./exp-info.txt
 
 # process metrics
 # cd ..

@@ -841,6 +841,9 @@ def run_mle(imagemodule_input_filename, smle = False, msmle = False, segment = F
     minumi = 1000
     this_mle = mleObj(imagemodule_input_filename)
     this_mle.reduce_to_largest_linkage_cluster()
+
+    # TODO: richard added code
+    self.perplexity_gl_rownorm = True
     
     if segment:
         for stopping_conductance in [0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2, 0.22, 0.24, 0.26]:
